@@ -35,6 +35,10 @@ if(ZVEC_ENABLE_OMEGA)
   # Source files
   set(OMEGA_SOURCES
     src/tree_inference.cpp
+    src/feature_extractor.cpp
+    src/model_manager.cpp
+    src/search_context.cpp
+    src/omega_api.cpp
   )
 
   # Create omega library
@@ -54,19 +58,36 @@ if(ZVEC_ENABLE_OMEGA)
     find_package(GTest REQUIRED)
     include_directories(${GTEST_INCLUDE_DIRS})
 
-    # Test executable
+    # Test executables
     add_executable(tree_inference_test
       tests/tree_inference_test.cpp
     )
-
     target_link_libraries(tree_inference_test
       omega
       GTest::GTest
       GTest::Main
     )
-
-    # Add test
     add_test(NAME tree_inference_test COMMAND tree_inference_test)
+
+    add_executable(feature_extractor_test
+      tests/feature_extractor_test.cpp
+    )
+    target_link_libraries(feature_extractor_test
+      omega
+      GTest::GTest
+      GTest::Main
+    )
+    add_test(NAME feature_extractor_test COMMAND feature_extractor_test)
+
+    add_executable(search_context_test
+      tests/search_context_test.cpp
+    )
+    target_link_libraries(search_context_test
+      omega
+      GTest::GTest
+      GTest::Main
+    )
+    add_test(NAME search_context_test COMMAND search_context_test)
   endif()
 
   # Installation

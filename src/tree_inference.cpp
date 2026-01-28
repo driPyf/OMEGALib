@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "tree_inference.h"
+#include "omega/tree_inference.h"
 
 #include <cmath>
 #include <fstream>
