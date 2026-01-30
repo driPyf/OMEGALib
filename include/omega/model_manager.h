@@ -16,6 +16,7 @@
 #define ZVEC_THIRDPARTY_OMEGA_INCLUDE_MODEL_MANAGER_H_
 
 #include <string>
+#include <map>
 #include <unordered_map>
 #include <memory>
 #include "omega/tree_inference.h"
@@ -28,11 +29,13 @@ namespace omega {
 struct ModelTables {
   // Maps threshold value (scaled by 10000) to expected recall
   // Format: threshold_table[int(threshold * 10000)] = recall
-  std::unordered_map<int, float> threshold_table;
+  // Using std::map for ordered lookup
+  std::map<int, float> threshold_table;
 
   // Maps recall (scaled by 100) to (initial_interval, min_interval)
   // Format: interval_table[int(recall * 100)] = (initial, min)
-  std::unordered_map<int, std::pair<int, int>> interval_table;
+  // Using std::map for ordered lookup
+  std::map<int, std::pair<int, int>> interval_table;
 
   // Maps recall (scaled by 100) to EF multiplier
   // Format: multiplier_table[int(recall * 100)] = multiplier

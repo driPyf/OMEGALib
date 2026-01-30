@@ -49,53 +49,64 @@ void omega_model_destroy(OmegaModelHandle handle);
 
 // Search context functions
 
-// Create a new search context
+// Create a new search context with parameters (stateful interface)
 // Parameters:
 //   model: Model manager handle (must be loaded)
+//   target_recall: Target recall value (0.0 to 1.0)
+//   k: Top-K value
+//   window_size: Traversal window size (default 100)
 // Returns: Handle to search context, or NULL on failure
-OmegaSearchHandle omega_search_create(OmegaModelHandle model);
+OmegaSearchHandle omega_search_create_with_params(OmegaModelHandle model,
+                                                   float target_recall,
+                                                   int k,
+                                                   int window_size);
 
 // Reset search context for a new query
 // Parameters:
 //   handle: Search context handle
 void omega_search_reset(OmegaSearchHandle handle);
 
-// Update search state with new information
-// Parameters:
-//   handle: Search context handle
-//   hops: Current hop count
-//   comparisons: Current comparison count
-//   distance: Latest distance value
-void omega_search_update(OmegaSearchHandle handle, int hops,
-                        int comparisons, float distance);
-
-// Set the distance to the first result
-// Parameters:
-//   handle: Search context handle
-//   dist_1st: Distance to first result
-void omega_search_set_dist_1st(OmegaSearchHandle handle, float dist_1st);
-
-// Set the distance to the start node
+// Set the distance to the start node (called once at search start)
 // Parameters:
 //   handle: Search context handle
 //   dist_start: Distance to start node
 void omega_search_set_dist_start(OmegaSearchHandle handle, float dist_start);
 
+// Report a node visit during search (stateful interface)
+// Parameters:
+//   handle: Search context handle
+//   node_id: ID of the visited node
+//   distance: Distance to the visited node
+//   is_in_topk: 1 if node is in current top-K results, 0 otherwise
+void omega_search_report_visit(OmegaSearchHandle handle, int node_id,
+                               float distance, int is_in_topk);
+
+// Report a hop during search (stateful interface)
+// Parameters:
+//   handle: Search context handle
+void omega_search_report_hop(OmegaSearchHandle handle);
+
+// Check if should perform prediction now (stateful interface)
+// Based on interval_table and current comparison count
+// Parameters:
+//   handle: Search context handle
+// Returns: 1 if should predict, 0 otherwise
+int omega_search_should_predict(OmegaSearchHandle handle);
+
 // Check if search should stop early
 // Parameters:
 //   handle: Search context handle
-//   target_recall: Target recall value (0.0 to 1.0)
 // Returns: 1 if should stop, 0 if should continue, -1 on error
-int omega_search_should_stop(OmegaSearchHandle handle, float target_recall);
+int omega_search_should_stop(OmegaSearchHandle handle);
 
-// Get optimal EF value for current search state
+// Get current search statistics (stateful interface)
 // Parameters:
 //   handle: Search context handle
-//   target_recall: Target recall value (0.0 to 1.0)
-//   current_ef: Current EF value
-// Returns: Optimal EF value, or current_ef on error
-int omega_search_get_optimal_ef(OmegaSearchHandle handle,
-                               float target_recall, int current_ef);
+//   hops: Output pointer for hop count (can be NULL)
+//   comparisons: Output pointer for comparison count (can be NULL)
+//   collected_gt: Output pointer for collected ground truth count (can be NULL)
+void omega_search_get_stats(OmegaSearchHandle handle, int* hops,
+                           int* comparisons, int* collected_gt);
 
 // Destroy search context and free resources
 // Parameters:

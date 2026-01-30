@@ -15,151 +15,246 @@
 #include "omega/search_context.h"
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace omega {
 
-SearchContext::SearchContext(const GBDTModel* model, const ModelTables* tables)
-    : model_(model), tables_(tables), feature_extractor_() {}
+SearchContext::SearchContext(const GBDTModel* model, const ModelTables* tables,
+                             float target_recall, int k, int window_size)
+    : model_(model),
+      tables_(tables),
+      target_recall_(target_recall),
+      k_(k),
+      window_size_(window_size),
+      hops_(0),
+      comparisons_(0),
+      dist_start_(std::numeric_limits<float>::max()),
+      dist_1st_(std::numeric_limits<float>::max()),
+      collected_gt_(0),
+      next_prediction_cmps_(50) {
+  // Get initial prediction interval from interval_table
+  auto interval = GetPredictionInterval(target_recall);
+  next_prediction_cmps_ = interval.first;  // initial_interval
+}
 
 SearchContext::~SearchContext() = default;
 
 void SearchContext::Reset() {
-  state_ = SearchState();
+  traversal_window_.clear();
+  topk_node_ids_.clear();
+  hops_ = 0;
+  comparisons_ = 0;
+  dist_start_ = std::numeric_limits<float>::max();
+  dist_1st_ = std::numeric_limits<float>::max();
+  collected_gt_ = 0;
+
+  // Reset prediction interval
+  auto interval = GetPredictionInterval(target_recall_);
+  next_prediction_cmps_ = interval.first;
 }
 
-void SearchContext::UpdateState(int hops, int comparisons, float distance) {
-  state_.curr_hops = hops;
-  state_.curr_cmps = comparisons;
+void SearchContext::ReportVisit(int node_id, float distance, bool is_in_topk) {
+  comparisons_++;
 
-  // Update distance window
-  state_.distance_window.push_back(distance);
-
-  // Keep window size bounded
-  if (state_.distance_window.size() > feature_extractor_.kDefaultWindowSize) {
-    state_.distance_window.erase(state_.distance_window.begin());
+  // Update traversal window
+  traversal_window_.push_back({node_id, distance});
+  if (traversal_window_.size() > static_cast<size_t>(window_size_)) {
+    traversal_window_.pop_front();
   }
 
-  // Update dist_1st if this is the first distance or closer
-  if (state_.distance_window.size() == 1 || distance < state_.dist_1st) {
-    state_.dist_1st = distance;
+  // Update topk tracking
+  if (is_in_topk) {
+    topk_node_ids_.insert(node_id);
+    // Update dist_1st (best distance in topk)
+    if (distance < dist_1st_) {
+      dist_1st_ = distance;
+    }
   }
 }
 
-bool SearchContext::ShouldStopEarly(float target_recall) {
+void SearchContext::ReportHop() {
+  hops_++;
+}
+
+bool SearchContext::ShouldPredict() const {
+  // Check if we have enough results and reached prediction point
+  return comparisons_ >= next_prediction_cmps_ &&
+         static_cast<int>(topk_node_ids_.size()) >= k_;
+}
+
+void SearchContext::GetStats(int* hops, int* comparisons, int* collected_gt) const {
+  if (hops) *hops = hops_;
+  if (comparisons) *comparisons = comparisons_;
+  if (collected_gt) *collected_gt = collected_gt_;
+}
+
+bool SearchContext::ShouldStopEarly() {
   if (!model_ || !tables_) {
     return false;  // No model, can't make decision
   }
 
-  // Predict current score
-  float score = PredictScore();
-
-  // Map score to expected recall
-  float expected_recall = ScoreToRecall(score);
-
-  // Stop if we've reached target recall
-  return expected_recall >= target_recall;
-}
-
-int SearchContext::GetOptimalEF(float target_recall, int current_ef) {
-  if (!model_ || !tables_) {
-    return current_ef;  // No model, use current EF
+  // Extract features and predict
+  std::vector<float> features = ExtractFeatures();
+  if (features.empty()) {
+    return false;  // Not enough data yet
   }
 
-  // Get EF multiplier for target recall
-  float multiplier = GetEFMultiplier(target_recall);
+  float predicted_recall = PredictWithFeatures(features);
 
-  // Apply multiplier to current EF
-  int optimal_ef = static_cast<int>(current_ef * multiplier);
+  // Update next prediction point based on current recall
+  auto interval = GetPredictionInterval(target_recall_);
+  int min_interval = interval.second;
+  int initial_interval = interval.first;
 
-  // Ensure EF is at least 1
-  return std::max(1, optimal_ef);
+  // Adjust next prediction based on how close we are to target
+  float recall_gap = target_recall_ - predicted_recall;
+  int interval_adjustment = static_cast<int>(
+      min_interval + (initial_interval - min_interval) * std::max(0.0f, recall_gap));
+  next_prediction_cmps_ = comparisons_ + interval_adjustment;
+
+  // Update collected_gt based on topk
+  collected_gt_ = static_cast<int>(topk_node_ids_.size());
+
+  // Stop if we've reached target recall
+  return predicted_recall >= target_recall_;
 }
 
-float SearchContext::PredictScore() {
-  // Extract features from current state
-  std::vector<float> features = feature_extractor_.Extract(state_);
+std::vector<float> SearchContext::ExtractFeatures() {
+  // Need at least some data in traversal window
+  if (traversal_window_.empty()) {
+    return std::vector<float>();
+  }
+
+  // Extract 11-dimensional features:
+  // [curr_hops, curr_cmps, dist_1st, dist_start, avg, var, min, max, med, perc25, perc75]
+  std::vector<float> features(11);
+
+  features[0] = static_cast<float>(hops_);
+  features[1] = static_cast<float>(comparisons_);
+  features[2] = dist_1st_;
+  features[3] = dist_start_;
+
+  // Get 7-dim traversal window statistics
+  // masked_ids: nodes already in topk (for per-K prediction)
+  std::vector<int> masked_ids(topk_node_ids_.begin(), topk_node_ids_.end());
+  std::sort(masked_ids.begin(), masked_ids.end());
+
+  std::vector<float> window_stats = GetTraversalWindowStats(masked_ids);
+
+  // Copy window stats to features[4..10]
+  for (size_t i = 0; i < window_stats.size() && i < 7; ++i) {
+    features[4 + i] = window_stats[i];
+  }
+
+  return features;
+}
+
+std::vector<float> SearchContext::GetTraversalWindowStats(
+    const std::vector<int>& masked_ids) {
+  // Sort traversal_window by distance
+  std::vector<std::pair<int, float>> sorted_window(
+      traversal_window_.begin(), traversal_window_.end());
+  std::sort(sorted_window.begin(), sorted_window.end(),
+            [](const auto& a, const auto& b) { return a.second < b.second; });
+
+  auto original_len = sorted_window.size();
+  size_t len = 0;
+  std::vector<float> distances;
+  distances.reserve(original_len);
+
+  // stats: avg, var, min, max, med, perc25, perc75
+  float avg = 0;
+  float var = 0;
+  float min = std::numeric_limits<float>::max();
+  float max = std::numeric_limits<float>::min();
+
+  for (size_t i = 0; i < original_len; i++) {
+    // Check if this node is masked
+    auto it = std::lower_bound(masked_ids.begin(), masked_ids.end(),
+                               sorted_window[i].first);
+    // curr id is not masked
+    if (it == masked_ids.end() || *it != sorted_window[i].first) {
+      len++;
+      float dist = sorted_window[i].second;
+      distances.push_back(dist);
+      avg += dist;
+      var += dist * dist;
+      min = std::min(min, dist);
+      max = std::max(max, dist);
+    }
+  }
+
+  if (len == 0) {
+    return std::vector<float>({0, 0, 0, 0, 0, 0, 0});
+  }
+  if (len == 1) {
+    return std::vector<float>({avg, 0, avg, avg, avg, avg, avg});
+  }
+
+  size_t len25 = len / 4;
+  size_t len50 = len / 2;
+  size_t len75 = len * 3 / 4;
+
+  float perc25 = distances[len25];
+  float med = distances[len50];
+  float perc75 = distances[len75];
+
+  avg /= len;
+  var = var / len - avg * avg;
+
+  return std::vector<float>({avg, var, min, max, med, perc25, perc75});
+}
+
+float SearchContext::PredictWithFeatures(const std::vector<float>& features) {
+  if (!model_ || features.size() != 11) {
+    return 0.0f;
+  }
 
   // Convert float features to double for model prediction
   std::vector<double> features_double(features.begin(), features.end());
 
-  // Get model prediction (probability)
-  double probability = model_->Predict(features_double.data(), features_double.size());
+  // Get model prediction (raw score)
+  double raw_score = model_->Predict(features_double.data(), features_double.size());
 
-  // Convert probability to score (0-100 range)
-  // This matches the OMEGA paper's approach
-  return probability * 100.0f;
-}
+  // Apply sigmoid to get probability
+  double probability = 1.0 / (1.0 + std::exp(-raw_score));
 
-float SearchContext::ScoreToRecall(float score) {
+  // Map probability to recall using threshold_table
   if (!tables_ || tables_->threshold_table.empty()) {
-    return 0.0f;
+    return static_cast<float>(probability);
   }
 
-  // Threshold table maps int(threshold * 10000) to recall
-  return LookupTable(tables_->threshold_table, score, 10000.0f);
+  // threshold_table maps int(probability * 10000) to recall
+  int score_key = static_cast<int>(std::round(probability * 10000));
+
+  // Find the recall value in threshold_table
+  auto it = tables_->threshold_table.upper_bound(score_key);
+  if (it != tables_->threshold_table.begin()) {
+    --it;
+  }
+
+  return it->second;
 }
 
-float SearchContext::GetEFMultiplier(float target_recall) {
-  if (!tables_ || tables_->multiplier_table.empty()) {
-    return 1.0f;  // Default multiplier
+std::pair<int, int> SearchContext::GetPredictionInterval(float target_recall) {
+  if (!tables_ || tables_->interval_table.empty()) {
+    return {50, 10};  // Default: initial_interval=50, min_interval=10
   }
 
-  // Multiplier table maps int(recall * 100) to multiplier
-  return LookupTable(tables_->multiplier_table, target_recall, 100.0f);
-}
+  // interval_table maps int(recall * 100) to (initial_interval, min_interval)
+  int recall_key = static_cast<int>(std::round(target_recall * 100));
 
-float SearchContext::LookupTable(
-    const std::unordered_map<int, float>& table,
-    float key, float scale) const {
-  if (table.empty()) {
-    return 0.0f;
-  }
-
-  int scaled_key = static_cast<int>(key * scale);
-
-  // Exact match
-  auto it = table.find(scaled_key);
-  if (it != table.end()) {
+  auto it = tables_->interval_table.lower_bound(recall_key);
+  if (it != tables_->interval_table.end()) {
     return it->second;
   }
 
-  // Linear interpolation between nearest neighbors
-  int lower_key = -1;
-  int upper_key = -1;
-  float lower_value = 0.0f;
-  float upper_value = 0.0f;
-
-  for (const auto& entry : table) {
-    if (entry.first <= scaled_key) {
-      if (lower_key == -1 || entry.first > lower_key) {
-        lower_key = entry.first;
-        lower_value = entry.second;
-      }
-    }
-    if (entry.first >= scaled_key) {
-      if (upper_key == -1 || entry.first < upper_key) {
-        upper_key = entry.first;
-        upper_value = entry.second;
-      }
-    }
+  // If not found, use the largest available
+  if (!tables_->interval_table.empty()) {
+    return tables_->interval_table.rbegin()->second;
   }
 
-  // If we only have one side, use that value
-  if (lower_key == -1) {
-    return upper_value;
-  }
-  if (upper_key == -1) {
-    return lower_value;
-  }
-
-  // Interpolate
-  if (lower_key == upper_key) {
-    return lower_value;
-  }
-
-  float ratio = static_cast<float>(scaled_key - lower_key) /
-                static_cast<float>(upper_key - lower_key);
-  return lower_value + ratio * (upper_value - lower_value);
+  return {50, 10};
 }
 
 } // namespace omega

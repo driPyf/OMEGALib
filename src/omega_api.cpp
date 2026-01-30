@@ -79,7 +79,10 @@ void omega_model_destroy(OmegaModelHandle handle) {
 
 // Search context functions
 
-OmegaSearchHandle omega_search_create(OmegaModelHandle model) {
+OmegaSearchHandle omega_search_create_with_params(OmegaModelHandle model,
+                                                   float target_recall,
+                                                   int k,
+                                                   int window_size) {
   if (!model || !model->manager || !model->manager->IsLoaded()) {
     return nullptr;
   }
@@ -88,7 +91,10 @@ OmegaSearchHandle omega_search_create(OmegaModelHandle model) {
     OmegaSearchHandle handle = new OmegaSearchContext();
     handle->context = new omega::SearchContext(
         model->manager->GetModel(),
-        model->manager->GetTables());
+        model->manager->GetTables(),
+        target_recall,
+        k,
+        window_size);
     return handle;
   } catch (...) {
     return nullptr;
@@ -107,70 +113,78 @@ void omega_search_reset(OmegaSearchHandle handle) {
   }
 }
 
-void omega_search_update(OmegaSearchHandle handle, int hops,
-                        int comparisons, float distance) {
-  if (!handle || !handle->context) {
-    return;
-  }
-
-  try {
-    handle->context->UpdateState(hops, comparisons, distance);
-  } catch (...) {
-    // Ignore exceptions
-  }
-}
-
-void omega_search_set_dist_1st(OmegaSearchHandle handle, float dist_1st) {
-  if (!handle || !handle->context) {
-    return;
-  }
-
-  try {
-    // Access the state and set dist_1st
-    auto& state = const_cast<omega::SearchState&>(handle->context->GetState());
-    state.dist_1st = dist_1st;
-  } catch (...) {
-    // Ignore exceptions
-  }
-}
-
 void omega_search_set_dist_start(OmegaSearchHandle handle, float dist_start) {
   if (!handle || !handle->context) {
     return;
   }
 
   try {
-    // Access the state and set dist_start
-    auto& state = const_cast<omega::SearchState&>(handle->context->GetState());
-    state.dist_start = dist_start;
+    handle->context->SetDistStart(dist_start);
   } catch (...) {
     // Ignore exceptions
   }
 }
 
-int omega_search_should_stop(OmegaSearchHandle handle, float target_recall) {
+void omega_search_report_visit(OmegaSearchHandle handle, int node_id,
+                               float distance, int is_in_topk) {
+  if (!handle || !handle->context) {
+    return;
+  }
+
+  try {
+    handle->context->ReportVisit(node_id, distance, is_in_topk != 0);
+  } catch (...) {
+    // Ignore exceptions
+  }
+}
+
+void omega_search_report_hop(OmegaSearchHandle handle) {
+  if (!handle || !handle->context) {
+    return;
+  }
+
+  try {
+    handle->context->ReportHop();
+  } catch (...) {
+    // Ignore exceptions
+  }
+}
+
+int omega_search_should_predict(OmegaSearchHandle handle) {
+  if (!handle || !handle->context) {
+    return 0;
+  }
+
+  try {
+    return handle->context->ShouldPredict() ? 1 : 0;
+  } catch (...) {
+    return 0;
+  }
+}
+
+int omega_search_should_stop(OmegaSearchHandle handle) {
   if (!handle || !handle->context) {
     return -1;
   }
 
   try {
-    bool should_stop = handle->context->ShouldStopEarly(target_recall);
+    bool should_stop = handle->context->ShouldStopEarly();
     return should_stop ? 1 : 0;
   } catch (...) {
     return -1;
   }
 }
 
-int omega_search_get_optimal_ef(OmegaSearchHandle handle,
-                               float target_recall, int current_ef) {
+void omega_search_get_stats(OmegaSearchHandle handle, int* hops,
+                           int* comparisons, int* collected_gt) {
   if (!handle || !handle->context) {
-    return current_ef;
+    return;
   }
 
   try {
-    return handle->context->GetOptimalEF(target_recall, current_ef);
+    handle->context->GetStats(hops, comparisons, collected_gt);
   } catch (...) {
-    return current_ef;
+    // Ignore exceptions
   }
 }
 
