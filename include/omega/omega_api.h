@@ -15,6 +15,8 @@
 #ifndef ZVEC_THIRDPARTY_OMEGA_INCLUDE_OMEGA_API_H_
 #define ZVEC_THIRDPARTY_OMEGA_INCLUDE_OMEGA_API_H_
 
+#include <cstddef>  // For size_t
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -112,6 +114,31 @@ void omega_search_get_stats(OmegaSearchHandle handle, int* hops,
 // Parameters:
 //   handle: Search context handle
 void omega_search_destroy(OmegaSearchHandle handle);
+
+// Training mode functions (Phase 5)
+
+// Enable training mode for collecting features
+// Parameters:
+//   handle: Search context handle
+//   query_id: ID of the current query
+void omega_search_enable_training(OmegaSearchHandle handle, int query_id);
+
+// Disable training mode
+// Parameters:
+//   handle: Search context handle
+void omega_search_disable_training(OmegaSearchHandle handle);
+
+// Get training records collected so far
+// Parameters:
+//   handle: Search context handle
+// Returns: Pointer to training records array (opaque)
+const void* omega_search_get_training_records(OmegaSearchHandle handle);
+
+// Get number of training records collected
+// Parameters:
+//   handle: Search context handle
+// Returns: Number of training records
+size_t omega_search_get_training_records_count(OmegaSearchHandle handle);
 
 #ifdef __cplusplus
 }

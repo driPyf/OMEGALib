@@ -144,9 +144,11 @@ bool ModelManager::LoadGTCollectedTable(const std::string& path) {
       continue;
     }
 
-    int key, value;
-    if (ParseKeyValue(line, &key, &value)) {
-      tables_->gt_collected_table[key] = value;
+    // Parse 2D format: "row_index:val1,val2,...,valN"
+    int row_index;
+    std::vector<float> values;
+    if (Parse2DTableLine(line, &row_index, &values)) {
+      tables_->gt_collected_table[row_index] = std::move(values);
     }
   }
 
@@ -165,9 +167,11 @@ bool ModelManager::LoadGTCmpsAllTable(const std::string& path) {
       continue;
     }
 
-    int key, value;
-    if (ParseKeyValue(line, &key, &value)) {
-      tables_->gt_cmps_all_table[key] = value;
+    // Parse 2D format: "row_index:val1,val2,...,valN"
+    int row_index;
+    std::vector<float> values;
+    if (Parse2DTableLine(line, &row_index, &values)) {
+      tables_->gt_cmps_all_table[row_index] = std::move(values);
     }
   }
 
@@ -241,4 +245,38 @@ bool ModelManager::ParseKeyValuePair(const std::string& line, int* key,
   }
 }
 
+bool ModelManager::Parse2DTableLine(const std::string& line, int* row_index,
+                                   std::vector<float>* values) {
+  // Parse format: "row_index:val1,val2,...,valN"
+  size_t colon_pos = line.find(':');
+  if (colon_pos == std::string::npos) {
+    return false;
+  }
+
+  // Parse row index
+  std::string row_index_str = line.substr(0, colon_pos);
+  try {
+    *row_index = std::stoi(row_index_str);
+  } catch (...) {
+    return false;
+  }
+
+  // Parse comma-separated values
+  std::string values_str = line.substr(colon_pos + 1);
+  std::istringstream iss(values_str);
+  std::string value_str;
+
+  values->clear();
+  while (std::getline(iss, value_str, ',')) {
+    try {
+      values->push_back(std::stof(value_str));
+    } catch (...) {
+      return false;
+    }
+  }
+
+  return !values->empty();
+}
+
 } // namespace omega
+

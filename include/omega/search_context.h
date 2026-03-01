@@ -24,6 +24,18 @@
 
 namespace omega {
 
+// Training record structure for collecting features during search
+struct TrainingRecord {
+  int query_id;
+  int hops;
+  int cmps;
+  float dist_1st;
+  float dist_start;
+  std::vector<float> traversal_window_stats;  // 7 dimensions
+  std::vector<int> collected_node_ids;  // Node IDs in topk at this search state
+  int label;  // To be filled after search completes (0 or 1)
+};
+
 // Manages the state of an adaptive search operation using OMEGA.
 // Maintains search statistics, calls the GBDT model for predictions,
 // and determines when to stop early based on target recall.
@@ -59,6 +71,11 @@ class SearchContext {
   // Get current search statistics
   void GetStats(int* hops, int* comparisons, int* collected_gt) const;
 
+  // Training mode methods (Phase 5)
+  void EnableTrainingMode(int query_id);
+  void DisableTrainingMode();
+  const std::vector<TrainingRecord>& GetTrainingRecords() const { return training_records_; }
+
  private:
   const GBDTModel* model_;
   const ModelTables* tables_;
@@ -67,10 +84,13 @@ class SearchContext {
   float target_recall_;
   int k_;
   int window_size_;
+  int k_train_;  // K value used for training (default 1)
+  bool use_weighted_bh_;  // Use Weighted BH method
 
   // Search state
   std::deque<std::pair<int, float>> traversal_window_;  // (node_id, distance)
   std::set<int> topk_node_ids_;  // Node IDs currently in top-K (for masking)
+  std::vector<int> topk_node_ids_ordered_;  // Ordered candidate list for per-K prediction
   int hops_;
   int comparisons_;
   float dist_start_;
@@ -78,8 +98,24 @@ class SearchContext {
   int collected_gt_;  // Number of ground truth collected
   int next_prediction_cmps_;  // When to predict next
 
+  // Weighted BH state (Phase 4)
+  std::vector<float> recall_targets_;  // Recall target for each rank
+  std::vector<int> initial_intervals_;  // Initial prediction interval for each rank
+  std::vector<int> min_intervals_;  // Minimum prediction interval for each rank
+
+  // Training mode state (Phase 5)
+  bool training_mode_enabled_;
+  int current_query_id_;
+  std::vector<TrainingRecord> training_records_;
+
+  // Initialize Weighted BH method (Phase 4)
+  void InitializeWeightedBH();
+
   // Extract 11-dimensional features from current state
   std::vector<float> ExtractFeatures();
+
+  // Extract 11-dimensional features for specific rank (Phase 4)
+  std::vector<float> ExtractFeaturesForRank(int idx);
 
   // Extract 7-dimensional traversal window statistics
   std::vector<float> GetTraversalWindowStats(const std::vector<int>& masked_ids);
@@ -87,8 +123,17 @@ class SearchContext {
   // Predict with 11-dimensional features
   float PredictWithFeatures(const std::vector<float>& features);
 
+  // Predict recall for specific rank (Phase 4)
+  float PredictRecallForRank(int idx);
+
   // Get prediction interval from interval_table
   std::pair<int, int> GetPredictionInterval(float target_recall);
+
+  // Query gt_collected_table (Phase 4)
+  float GetRecallFromGtCollectedTable(int collected, int rank);
+
+  // Query gt_cmps_all_table (Phase 4)
+  float GetRecallFromGtCmpsAllTable(int rank, int cmps);
 };
 
 } // namespace omega

@@ -83,15 +83,21 @@ OmegaSearchHandle omega_search_create_with_params(OmegaModelHandle model,
                                                    float target_recall,
                                                    int k,
                                                    int window_size) {
-  if (!model || !model->manager || !model->manager->IsLoaded()) {
-    return nullptr;
+  // Allow nullptr model for training mode
+  // In training mode, we collect features without making predictions
+  const omega::GBDTModel* gbdt_model = nullptr;
+  const omega::ModelTables* tables = nullptr;
+
+  if (model && model->manager && model->manager->IsLoaded()) {
+    gbdt_model = model->manager->GetModel();
+    tables = model->manager->GetTables();
   }
 
   try {
     OmegaSearchHandle handle = new OmegaSearchContext();
     handle->context = new omega::SearchContext(
-        model->manager->GetModel(),
-        model->manager->GetTables(),
+        gbdt_model,
+        tables,
         target_recall,
         k,
         window_size);
@@ -200,5 +206,56 @@ void omega_search_destroy(OmegaSearchHandle handle) {
     delete handle;
   } catch (...) {
     // Ignore exceptions during cleanup
+  }
+}
+
+// Phase 5: Training mode functions
+
+void omega_search_enable_training(OmegaSearchHandle handle, int query_id) {
+  if (!handle || !handle->context) {
+    return;
+  }
+
+  try {
+    handle->context->EnableTrainingMode(query_id);
+  } catch (...) {
+    // Ignore exceptions
+  }
+}
+
+void omega_search_disable_training(OmegaSearchHandle handle) {
+  if (!handle || !handle->context) {
+    return;
+  }
+
+  try {
+    handle->context->DisableTrainingMode();
+  } catch (...) {
+    // Ignore exceptions
+  }
+}
+
+const void* omega_search_get_training_records(OmegaSearchHandle handle) {
+  if (!handle || !handle->context) {
+    return nullptr;
+  }
+
+  try {
+    const auto& records = handle->context->GetTrainingRecords();
+    return static_cast<const void*>(&records);
+  } catch (...) {
+    return nullptr;
+  }
+}
+
+size_t omega_search_get_training_records_count(OmegaSearchHandle handle) {
+  if (!handle || !handle->context) {
+    return 0;
+  }
+
+  try {
+    return handle->context->GetTrainingRecords().size();
+  } catch (...) {
+    return 0;
   }
 }

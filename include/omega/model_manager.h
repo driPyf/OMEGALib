@@ -41,13 +41,16 @@ struct ModelTables {
   // Format: multiplier_table[int(recall * 100)] = multiplier
   std::unordered_map<int, float> multiplier_table;
 
-  // Ground truth collection statistics
-  // Maps some key to collected count
-  std::unordered_map<int, int> gt_collected_table;
+  // Ground truth collection statistics (Phase 4)
+  // 2D table: gt_collected_table[collected][rank] = recall
+  // Format in file: "row_index:val1,val2,...,valK\n"
+  std::map<int, std::vector<float>> gt_collected_table;
 
-  // Ground truth comparison statistics
-  // Maps some key to total comparisons
-  std::unordered_map<int, int> gt_cmps_all_table;
+  // Ground truth comparison statistics (Phase 4)
+  // 2D table: gt_cmps_all_table[rank][percentile] = cmps_value
+  // Format in file: "row_index:val1,val2,...,val100\n"
+  // Contains 100 percentiles (1%, 2%, ..., 100%) for each rank
+  std::map<int, std::vector<float>> gt_cmps_all_table;
 
   ModelTables() = default;
 };
@@ -101,6 +104,10 @@ class ModelManager {
   bool ParseKeyValue(const std::string& line, int* key, int* value);
   bool ParseKeyValuePair(const std::string& line, int* key,
                         int* value1, int* value2);
+
+  // Helper to parse 2D table line with format "row_index:val1,val2,...,valN"
+  bool Parse2DTableLine(const std::string& line, int* row_index,
+                       std::vector<float>* values);
 };
 
 } // namespace omega
