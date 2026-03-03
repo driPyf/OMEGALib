@@ -107,6 +107,7 @@ class SearchContext {
   bool training_mode_enabled_;
   int current_query_id_;
   std::vector<TrainingRecord> training_records_;
+  std::vector<float> traversal_window_stats_cache_;  // Computed per-hop, reused per-visit
 
   // Initialize Weighted BH method (Phase 4)
   void InitializeWeightedBH();

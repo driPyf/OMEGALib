@@ -55,6 +55,7 @@ void SearchContext::Reset() {
   dist_start_ = std::numeric_limits<float>::max();
   dist_1st_ = std::numeric_limits<float>::max();
   collected_gt_ = 0;
+  traversal_window_stats_cache_.clear();  // Clear stats cache
 
   // Reset prediction interval
   auto interval = GetPredictionInterval(target_recall_);
@@ -85,6 +86,8 @@ void SearchContext::ReportVisit(int node_id, float distance, bool is_in_topk) {
   }
 
   // Phase 5: Collect training features if training mode is enabled
+  // PERFORMANCE: Use traversal_window_stats_cache_ computed in ReportHop()
+  // This is O(1) per visit instead of O(window_size * log(window_size))
   if (training_mode_enabled_) {
     TrainingRecord record;
     record.query_id = current_query_id_;
@@ -93,10 +96,13 @@ void SearchContext::ReportVisit(int node_id, float distance, bool is_in_topk) {
     record.dist_1st = dist_1st_;
     record.dist_start = dist_start_;
 
-    // Extract traversal window stats (7 dimensions)
-    std::vector<int> masked_ids(topk_node_ids_.begin(), topk_node_ids_.end());
-    std::sort(masked_ids.begin(), masked_ids.end());
-    record.traversal_window_stats = GetTraversalWindowStats(masked_ids);
+    // Use cached stats (computed in ReportHop) - O(1) copy
+    // If cache is empty (before first hop), use default zeros
+    if (traversal_window_stats_cache_.size() == 7) {
+      record.traversal_window_stats = traversal_window_stats_cache_;
+    } else {
+      record.traversal_window_stats = std::vector<float>(7, 0.0f);
+    }
 
     // Record current topk node IDs (copy from set to vector)
     record.collected_node_ids.assign(topk_node_ids_.begin(), topk_node_ids_.end());
@@ -109,6 +115,20 @@ void SearchContext::ReportVisit(int node_id, float distance, bool is_in_topk) {
 
 void SearchContext::ReportHop() {
   hops_++;
+
+  // Phase 5: Compute traversal window stats cache for training mode
+  // This is called ONCE per hop, before processing all neighbors
+  // The cached stats are then reused in ReportVisit() for each neighbor
+  // Matches original OMEGA design: O(window_size * log(window_size)) per hop
+  // instead of O(window_size * log(window_size)) per visit
+  if (training_mode_enabled_) {
+    std::vector<int> masked_ids;  // Empty for training mode (like original OMEGA)
+    auto traversal_window_sorted = std::vector<std::pair<int, float>>(
+        traversal_window_.begin(), traversal_window_.end());
+    std::sort(traversal_window_sorted.begin(), traversal_window_sorted.end(),
+              [](const auto& a, const auto& b) { return a.second < b.second; });
+    traversal_window_stats_cache_ = GetTraversalWindowStats(masked_ids);
+  }
 }
 
 bool SearchContext::ShouldPredict() const {
@@ -474,6 +494,7 @@ float SearchContext::GetRecallFromGtCmpsAllTable(int rank, int cmps) {
 void SearchContext::EnableTrainingMode(int query_id) {
   training_mode_enabled_ = true;
   current_query_id_ = query_id;
+  traversal_window_stats_cache_.clear();  // Clear cache for new query
 }
 
 // Phase 5: Disable training mode
