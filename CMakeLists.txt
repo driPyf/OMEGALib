@@ -22,21 +22,44 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${EXTERNAL_LIB_DIR})
 # Include directories
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-# Source files
+# ============================================================
+# LightGBM dependency (always required for omega)
+# ============================================================
+message(STATUS "OMEGA: Building with LightGBM support")
+
+# Find OpenMP (required by LightGBM)
+find_package(OpenMP REQUIRED)
+
+# LightGBM build options
+set(BUILD_STATIC_LIB ON CACHE BOOL "Build LightGBM as static library" FORCE)
+set(BUILD_CLI OFF CACHE BOOL "Disable LightGBM CLI" FORCE)
+set(USE_OPENMP ON CACHE BOOL "Enable OpenMP for LightGBM" FORCE)
+
+# Add LightGBM as subdirectory
+add_subdirectory(lightgbm EXCLUDE_FROM_ALL)
+
+# ============================================================
+# Omega source files
+# ============================================================
 set(OMEGA_SOURCES
-  src/tree_inference.cpp
   src/feature_extractor.cpp
   src/model_manager.cpp
   src/search_context.cpp
   src/omega_api.cpp
+  src/omega_trainer.cpp
+  src/tree_inference.cpp
 )
 
 # Create omega library
 add_library(omega STATIC ${OMEGA_SOURCES})
 target_include_directories(omega PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/lightgbm/include>
   $<INSTALL_INTERFACE:include>
 )
+
+# Link LightGBM and OpenMP
+target_link_libraries(omega PUBLIC _lightgbm OpenMP::OpenMP_CXX)
 
 # Restore output directory
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${_SAVED_CMAKE_ARCHIVE_OUTPUT_DIRECTORY})

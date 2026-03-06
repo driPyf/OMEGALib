@@ -13,190 +13,132 @@
 // limitations under the License.
 
 #include "omega/tree_inference.h"
-
 #include <cmath>
-#include <fstream>
-#include <sstream>
-#include <stdexcept>
+#include <cstdio>
+#include <cstring>
 
 namespace omega {
 
-double DecisionTree::Predict(const double* features,
-                              int32_t num_features) const {
-  if (nodes_.empty()) {
-    return 0.0;
+GBDTModel::GBDTModel() : booster_(nullptr), num_features_(0), num_iterations_(0) {}
+
+GBDTModel::~GBDTModel() {
+  if (booster_ != nullptr) {
+    LGBM_BoosterFree(booster_);
+    booster_ = nullptr;
   }
-
-  int32_t node_idx = 0;
-  while (!nodes_[node_idx].is_leaf) {
-    const TreeNode& node = nodes_[node_idx];
-
-    // Validate feature index
-    if (node.feature_index < 0 || node.feature_index >= num_features) {
-      throw std::runtime_error("Invalid feature index: " +
-                               std::to_string(node.feature_index));
-    }
-
-    // Navigate to left or right child based on threshold
-    if (features[node.feature_index] <= node.threshold) {
-      node_idx = node.left_child;
-    } else {
-      node_idx = node.right_child;
-    }
-
-    // Validate child index
-    if (node_idx < 0 || node_idx >= static_cast<int32_t>(nodes_.size())) {
-      throw std::runtime_error("Invalid child node index: " +
-                               std::to_string(node_idx));
-    }
-  }
-
-  return nodes_[node_idx].leaf_value;
 }
 
-int32_t DecisionTree::AddNode(const TreeNode& node) {
-  int32_t index = static_cast<int32_t>(nodes_.size());
-  nodes_.push_back(node);
-  return index;
+GBDTModel::GBDTModel(GBDTModel&& other) noexcept
+    : booster_(other.booster_),
+      num_features_(other.num_features_),
+      num_iterations_(other.num_iterations_) {
+  other.booster_ = nullptr;
+  other.num_features_ = 0;
+  other.num_iterations_ = 0;
+}
+
+GBDTModel& GBDTModel::operator=(GBDTModel&& other) noexcept {
+  if (this != &other) {
+    if (booster_ != nullptr) {
+      LGBM_BoosterFree(booster_);
+    }
+    booster_ = other.booster_;
+    num_features_ = other.num_features_;
+    num_iterations_ = other.num_iterations_;
+    other.booster_ = nullptr;
+    other.num_features_ = 0;
+    other.num_iterations_ = 0;
+  }
+  return *this;
 }
 
 double GBDTModel::Predict(const double* features, int32_t num_features) const {
   double raw_score = PredictRaw(features, num_features);
-  // Apply sigmoid transformation: 1 / (1 + exp(-x))
+  // Apply sigmoid transformation
   return 1.0 / (1.0 + std::exp(-raw_score));
 }
 
-double GBDTModel::PredictRaw(const double* features,
-                              int32_t num_features) const {
-  double sum = base_score_;
-  for (const auto& tree : trees_) {
-    sum += tree.Predict(features, num_features);
+double GBDTModel::PredictRaw(const double* features, int32_t num_features) const {
+  if (booster_ == nullptr) {
+    return 0.0;
   }
-  return sum;
+
+  int64_t out_len = 0;
+  double out_result = 0.0;
+
+  // Use LGBM_BoosterPredictForMatSingleRow for single sample prediction
+  int ret = LGBM_BoosterPredictForMatSingleRow(
+      booster_,
+      features,
+      C_API_DTYPE_FLOAT64,
+      num_features,
+      1,  // is_row_major
+      C_API_PREDICT_RAW_SCORE,  // predict_type: raw score (before sigmoid)
+      0,  // start_iteration
+      -1,  // num_iteration: -1 means use all iterations
+      "",  // parameter (empty string for defaults)
+      &out_len,
+      &out_result);
+
+  if (ret != 0) {
+    fprintf(stderr, "LightGBM prediction error: %s\n", LGBM_GetLastError());
+    return 0.0;
+  }
+
+  return out_result;
 }
 
 bool GBDTModel::LoadFromFile(const std::string& file_path) {
-  std::ifstream file(file_path);
-  if (!file.is_open()) {
+  // Free existing booster if any
+  if (booster_ != nullptr) {
+    LGBM_BoosterFree(booster_);
+    booster_ = nullptr;
+  }
+
+  int ret = LGBM_BoosterCreateFromModelfile(file_path.c_str(), &num_iterations_, &booster_);
+  if (ret != 0) {
+    fprintf(stderr, "Failed to load LightGBM model from %s: %s\n",
+            file_path.c_str(), LGBM_GetLastError());
+    booster_ = nullptr;
     return false;
   }
 
-  Clear();
-
-  std::string line;
-  DecisionTree* current_tree = nullptr;
-  int32_t tree_count = 0;
-
-  while (std::getline(file, line)) {
-    // Skip empty lines and comments
-    if (line.empty() || line[0] == '#') {
-      continue;
-    }
-
-    // Parse base_score
-    if (line.find("base_score=") == 0) {
-      base_score_ = std::stod(line.substr(11));
-      continue;
-    }
-
-    // Parse tree_count
-    if (line.find("tree_count=") == 0) {
-      tree_count = std::stoi(line.substr(11));
-      continue;
-    }
-
-    // Start of a new tree
-    if (line.find("Tree=") == 0) {
-      trees_.emplace_back();
-      current_tree = &trees_.back();
-      continue;
-    }
-
-    // Parse tree nodes
-    if (current_tree != nullptr && line.find("split_feature=") == 0) {
-      TreeNode node;
-      std::istringstream iss(line);
-      std::string token;
-
-      // Parse split_feature
-      std::getline(iss, token, '=');
-      std::getline(iss, token, ' ');
-      node.feature_index = std::stoi(token);
-
-      // Parse threshold
-      std::getline(iss, token, '=');
-      std::getline(iss, token, ' ');
-      node.threshold = std::stod(token);
-
-      // Parse left_child
-      std::getline(iss, token, '=');
-      std::getline(iss, token, ' ');
-      node.left_child = std::stoi(token);
-
-      // Parse right_child
-      std::getline(iss, token, '=');
-      std::getline(iss, token, ' ');
-      node.right_child = std::stoi(token);
-
-      node.is_leaf = false;
-      current_tree->AddNode(node);
-      continue;
-    }
-
-    // Parse leaf nodes
-    if (current_tree != nullptr && line.find("leaf_value=") == 0) {
-      TreeNode node;
-      node.leaf_value = std::stod(line.substr(11));
-      node.is_leaf = true;
-      current_tree->AddNode(node);
-      continue;
-    }
-  }
-
-  file.close();
-
-  // Validate tree count
-  if (tree_count > 0 && static_cast<int32_t>(trees_.size()) != tree_count) {
-    Clear();
+  // Get number of features
+  ret = LGBM_BoosterGetNumFeature(booster_, &num_features_);
+  if (ret != 0) {
+    fprintf(stderr, "Failed to get number of features: %s\n", LGBM_GetLastError());
+    LGBM_BoosterFree(booster_);
+    booster_ = nullptr;
     return false;
   }
 
-  return !trees_.empty();
+  return true;
 }
 
 bool GBDTModel::SaveToFile(const std::string& file_path) const {
-  std::ofstream file(file_path);
-  if (!file.is_open()) {
+  if (booster_ == nullptr) {
+    fprintf(stderr, "No model loaded, cannot save\n");
     return false;
   }
 
-  // Write header
-  file << "# OMEGA GBDT Model\n";
-  file << "base_score=" << base_score_ << "\n";
-  file << "tree_count=" << trees_.size() << "\n\n";
+  int ret = LGBM_BoosterSaveModel(
+      booster_,
+      0,  // start_iteration
+      -1,  // num_iteration: -1 means all iterations
+      C_API_FEATURE_IMPORTANCE_SPLIT,  // feature_importance_type
+      file_path.c_str());
 
-  // Write each tree
-  for (size_t tree_idx = 0; tree_idx < trees_.size(); ++tree_idx) {
-    file << "Tree=" << tree_idx << "\n";
-    const DecisionTree& tree = trees_[tree_idx];
-
-    for (int32_t node_idx = 0; node_idx < tree.GetNodeCount(); ++node_idx) {
-      const TreeNode& node = tree.GetNode(node_idx);
-
-      if (node.is_leaf) {
-        file << "leaf_value=" << node.leaf_value << "\n";
-      } else {
-        file << "split_feature=" << node.feature_index
-             << " threshold=" << node.threshold
-             << " left_child=" << node.left_child
-             << " right_child=" << node.right_child << "\n";
-      }
-    }
-    file << "\n";
+  if (ret != 0) {
+    fprintf(stderr, "Failed to save LightGBM model to %s: %s\n",
+            file_path.c_str(), LGBM_GetLastError());
+    return false;
   }
 
-  file.close();
   return true;
+}
+
+int32_t GBDTModel::GetTreeCount() const {
+  return num_iterations_;
 }
 
 }  // namespace omega
