@@ -1,3 +1,6 @@
 [submodule "lightgbm"]
 	path = lightgbm
 	url = https://github.com/microsoft/LightGBM.git
+[submodule "eigen"]
+	path = eigen
+	url = https://gitlab.com/libeigen/eigen.git

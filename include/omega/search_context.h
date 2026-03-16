@@ -25,6 +25,7 @@
 namespace omega {
 
 // Training record structure for collecting features during search
+// Memory-optimized: labels are computed in real-time, no need to store collected_node_ids
 struct TrainingRecord {
   int query_id;
   int hops;
@@ -32,8 +33,7 @@ struct TrainingRecord {
   float dist_1st;
   float dist_start;
   std::vector<float> traversal_window_stats;  // 7 dimensions
-  std::vector<int> collected_node_ids;  // Node IDs in topk at this search state
-  int label;  // To be filled after search completes (0 or 1)
+  int label;  // Computed in real-time during search (0 or 1)
 };
 
 // Manages the state of an adaptive search operation using OMEGA.
@@ -72,7 +72,9 @@ class SearchContext {
   void GetStats(int* hops, int* comparisons, int* collected_gt) const;
 
   // Training mode methods (Phase 5)
-  void EnableTrainingMode(int query_id);
+  // ground_truth: top-k ground truth node IDs for this query (used to compute labels in real-time)
+  // k_train: number of ground truth nodes to check (default 1)
+  void EnableTrainingMode(int query_id, const std::vector<int>& ground_truth, int k_train = 1);
   void DisableTrainingMode();
   const std::vector<TrainingRecord>& GetTrainingRecords() const { return training_records_; }
 
@@ -108,6 +110,7 @@ class SearchContext {
   int current_query_id_;
   std::vector<TrainingRecord> training_records_;
   std::vector<float> traversal_window_stats_cache_;  // Computed per-hop, reused per-visit
+  std::vector<int> ground_truth_;  // Ground truth node IDs for current query (for real-time label computation)
 
   // Initialize Weighted BH method (Phase 4)
   void InitializeWeightedBH();

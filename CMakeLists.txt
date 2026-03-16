@@ -39,6 +39,17 @@ set(USE_OPENMP ON CACHE BOOL "Enable OpenMP for LightGBM" FORCE)
 add_subdirectory(lightgbm EXCLUDE_FROM_ALL)
 
 # ============================================================
+# Eigen dependency (header-only, for fast ground truth computation)
+# ============================================================
+message(STATUS "OMEGA: Using Eigen for fast ground truth computation")
+
+# Eigen is header-only, just add include directory
+set(EIGEN_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/eigen)
+if(NOT EXISTS ${EIGEN_INCLUDE_DIR}/Eigen/Core)
+  message(FATAL_ERROR "Eigen not found at ${EIGEN_INCLUDE_DIR}. Please run: git submodule update --init --recursive")
+endif()
+
+# ============================================================
 # Omega source files
 # ============================================================
 set(OMEGA_SOURCES
@@ -48,6 +59,7 @@ set(OMEGA_SOURCES
   src/omega_api.cpp
   src/omega_trainer.cpp
   src/tree_inference.cpp
+  src/ground_truth.cpp
 )
 
 # Create omega library
@@ -55,6 +67,7 @@ add_library(omega STATIC ${OMEGA_SOURCES})
 target_include_directories(omega PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/lightgbm/include>
+  $<BUILD_INTERFACE:${EIGEN_INCLUDE_DIR}>
   $<INSTALL_INTERFACE:include>
 )
 

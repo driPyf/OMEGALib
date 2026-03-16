@@ -22,6 +22,7 @@ namespace omega {
 
 /**
  * @brief Training record for OMEGA model
+ * Memory-optimized: labels are computed in real-time, no need to store collected_node_ids
  */
 struct TrainingRecord {
   int query_id = 0;
@@ -30,8 +31,7 @@ struct TrainingRecord {
   float dist_1st = 0.0f;
   float dist_start = 0.0f;
   std::vector<float> traversal_window_stats;  // 7 dimensions
-  int label = 0;
-  std::vector<uint64_t> collected_node_ids;
+  int label = 0;  // Computed in real-time during search
 };
 
 /**

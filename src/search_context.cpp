@@ -86,8 +86,8 @@ void SearchContext::ReportVisit(int node_id, float distance, bool is_in_topk) {
   }
 
   // Phase 5: Collect training features if training mode is enabled
-  // PERFORMANCE: Use traversal_window_stats_cache_ computed in ReportHop()
-  // This is O(1) per visit instead of O(window_size * log(window_size))
+  // MEMORY OPTIMIZED: Compute label in real-time instead of storing collected_node_ids
+  // This reduces memory from O(records * ef) to O(records * 11_features)
   if (training_mode_enabled_) {
     TrainingRecord record;
     record.query_id = current_query_id_;
@@ -104,10 +104,19 @@ void SearchContext::ReportVisit(int node_id, float distance, bool is_in_topk) {
       record.traversal_window_stats = std::vector<float>(7, 0.0f);
     }
 
-    // Record current topk node IDs (copy from set to vector)
-    record.collected_node_ids.assign(topk_node_ids_.begin(), topk_node_ids_.end());
-
-    record.label = 0;  // Will be filled after search completes
+    // Compute label in real-time: check if top k_train_ ground truth nodes are all in topk
+    // Label = 1 iff ALL top k_train_ GT nodes are found in current topk_node_ids_
+    record.label = 0;
+    if (!ground_truth_.empty()) {
+      size_t actual_k = std::min(static_cast<size_t>(k_train_), ground_truth_.size());
+      bool all_found = true;
+      for (size_t i = 0; i < actual_k && all_found; ++i) {
+        if (topk_node_ids_.find(ground_truth_[i]) == topk_node_ids_.end()) {
+          all_found = false;
+        }
+      }
+      record.label = all_found ? 1 : 0;
+    }
 
     training_records_.push_back(record);
   }
@@ -490,10 +499,12 @@ float SearchContext::GetRecallFromGtCmpsAllTable(int rank, int cmps) {
   return static_cast<float>(percentile_idx) / 100.0f;
 }
 
-// Phase 5: Enable training mode
-void SearchContext::EnableTrainingMode(int query_id) {
+// Phase 5: Enable training mode with ground truth for real-time label computation
+void SearchContext::EnableTrainingMode(int query_id, const std::vector<int>& ground_truth, int k_train) {
   training_mode_enabled_ = true;
   current_query_id_ = query_id;
+  ground_truth_ = ground_truth;
+  k_train_ = k_train;
   traversal_window_stats_cache_.clear();  // Clear cache for new query
 }
 
@@ -501,6 +512,7 @@ void SearchContext::EnableTrainingMode(int query_id) {
 void SearchContext::DisableTrainingMode() {
   training_mode_enabled_ = false;
   current_query_id_ = -1;
+  ground_truth_.clear();
 }
 
 } // namespace omega

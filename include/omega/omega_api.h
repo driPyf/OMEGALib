@@ -117,11 +117,15 @@ void omega_search_destroy(OmegaSearchHandle handle);
 
 // Training mode functions (Phase 5)
 
-// Enable training mode for collecting features
+// Enable training mode for collecting features with ground truth for real-time label computation
 // Parameters:
 //   handle: Search context handle
 //   query_id: ID of the current query
-void omega_search_enable_training(OmegaSearchHandle handle, int query_id);
+//   ground_truth: Array of ground truth node IDs (sorted by rank)
+//   gt_count: Number of ground truth nodes
+//   k_train: Number of GT nodes to check for label (typically 1)
+void omega_search_enable_training(OmegaSearchHandle handle, int query_id,
+                                   const int* ground_truth, size_t gt_count, int k_train);
 
 // Disable training mode
 // Parameters:

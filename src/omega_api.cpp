@@ -211,13 +211,18 @@ void omega_search_destroy(OmegaSearchHandle handle) {
 
 // Phase 5: Training mode functions
 
-void omega_search_enable_training(OmegaSearchHandle handle, int query_id) {
+void omega_search_enable_training(OmegaSearchHandle handle, int query_id,
+                                   const int* ground_truth, size_t gt_count, int k_train) {
   if (!handle || !handle->context) {
     return;
   }
 
   try {
-    handle->context->EnableTrainingMode(query_id);
+    std::vector<int> gt_vec;
+    if (ground_truth && gt_count > 0) {
+      gt_vec.assign(ground_truth, ground_truth + gt_count);
+    }
+    handle->context->EnableTrainingMode(query_id, gt_vec, k_train);
   } catch (...) {
     // Ignore exceptions
   }
