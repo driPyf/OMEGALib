@@ -19,8 +19,11 @@
 #include "omega/model_manager.h"
 #include "omega/feature_extractor.h"
 #include <deque>
+#include <limits>
+#include <array>
 #include <vector>
-#include <set>
+#include <unordered_set>
+#include <cstdint>
 
 namespace omega {
 
@@ -42,6 +45,12 @@ struct TrainingRecord {
 // This is a stateful interface - zvec reports each node visit.
 class SearchContext {
  public:
+  struct TopCandidate {
+    int id;
+    float distance;
+    int cmps;
+  };
+
   // Create a search context with parameters
   SearchContext(const GBDTModel* model, const ModelTables* tables,
                 float target_recall, int k, int window_size);
@@ -53,6 +62,11 @@ class SearchContext {
 
   // Report a node visit during search
   void ReportVisit(int node_id, float distance, bool is_in_topk);
+
+  // Report a node visit and let SearchContext maintain the result-set-sized
+  // top-k structure directly. Returns whether the node was inserted into the
+  // current top-k result set.
+  bool ReportVisitCandidate(int node_id, float distance, bool should_consider);
 
   // Report a hop during search
   void ReportHop();
@@ -70,6 +84,31 @@ class SearchContext {
 
   // Get current search statistics
   void GetStats(int* hops, int* comparisons, int* collected_gt) const;
+  float GetLastPredictedRecallAvg() const { return last_predicted_recall_avg_; }
+  float GetLastPredictedRecallAtTarget() const {
+    return last_predicted_recall_at_target_;
+  }
+  bool EarlyStopHit() const { return early_stop_hit_; }
+  uint64_t GetShouldStopCalls() const { return should_stop_calls_; }
+  uint64_t GetPredictionCalls() const { return prediction_calls_; }
+  uint64_t GetShouldStopTimeNs() const { return should_stop_time_ns_; }
+  uint64_t GetPredictionEvalTimeNs() const { return prediction_eval_time_ns_; }
+  uint64_t GetSortedWindowTimeNs() const { return sorted_window_time_ns_; }
+  uint64_t GetAverageRecallEvalTimeNs() const {
+    return average_recall_eval_time_ns_;
+  }
+  uint64_t GetPredictionFeaturePrepTimeNs() const {
+    return prediction_feature_prep_time_ns_;
+  }
+  uint64_t GetCollectedGtAdvanceCount() const {
+    return collected_gt_advance_count_;
+  }
+  uint64_t GetShouldStopCallsWithAdvance() const {
+    return should_stop_calls_with_advance_;
+  }
+  uint64_t GetMaxPredictionCallsPerShouldStop() const {
+    return max_prediction_calls_per_should_stop_;
+  }
 
   // Training mode methods (Phase 5)
   // ground_truth: top-k ground truth node IDs for this query (used to compute labels in real-time)
@@ -77,6 +116,12 @@ class SearchContext {
   void EnableTrainingMode(int query_id, const std::vector<int>& ground_truth, int k_train = 1);
   void DisableTrainingMode();
   const std::vector<TrainingRecord>& GetTrainingRecords() const { return training_records_; }
+
+  // Get gt_cmps data: cmps value when each GT rank was first found in topk
+  // Returns vector of size ground_truth.size(), where gt_cmps[rank] = cmps when GT[rank] was found
+  // If GT[rank] was never found, returns total_cmps (the final cmps count)
+  const std::vector<int>& GetGtCmpsPerRank() const { return gt_cmps_per_rank_; }
+  int GetTotalCmps() const { return comparisons_; }
 
  private:
   const GBDTModel* model_;
@@ -91,14 +136,16 @@ class SearchContext {
 
   // Search state
   std::deque<std::pair<int, float>> traversal_window_;  // (node_id, distance)
-  std::set<int> topk_node_ids_;  // Node IDs currently in top-K (for masking)
-  std::vector<int> topk_node_ids_ordered_;  // Ordered candidate list for per-K prediction
+  std::vector<TopCandidate> top_candidates_;  // Current top-K candidates, sorted by distance
   int hops_;
   int comparisons_;
   float dist_start_;
   float dist_1st_;
   int collected_gt_;  // Number of ground truth collected
   int next_prediction_cmps_;  // When to predict next
+  float last_predicted_recall_avg_;
+  float last_predicted_recall_at_target_;
+  bool early_stop_hit_;
 
   // Weighted BH state (Phase 4)
   std::vector<float> recall_targets_;  // Recall target for each rank
@@ -111,9 +158,26 @@ class SearchContext {
   std::vector<TrainingRecord> training_records_;
   std::vector<float> traversal_window_stats_cache_;  // Computed per-hop, reused per-visit
   std::vector<int> ground_truth_;  // Ground truth node IDs for current query (for real-time label computation)
+  std::vector<int> gt_cmps_per_rank_;  // cmps value when each GT rank was first found in topk
+  std::unordered_set<int> gt_found_set_;  // Set of GT node IDs already found (for O(1) lookup)
+
+  // Hot-path runtime statistics for diagnosing query-side overhead.
+  uint64_t should_stop_calls_;
+  uint64_t prediction_calls_;
+  uint64_t should_stop_time_ns_;
+  uint64_t prediction_eval_time_ns_;
+  uint64_t sorted_window_time_ns_;
+  uint64_t average_recall_eval_time_ns_;
+  uint64_t prediction_feature_prep_time_ns_;
+  uint64_t collected_gt_advance_count_;
+  uint64_t should_stop_calls_with_advance_;
+  uint64_t max_prediction_calls_per_should_stop_;
 
   // Initialize Weighted BH method (Phase 4)
   void InitializeWeightedBH();
+
+  // Maintain the current top-k candidates like the reference implementation.
+  bool UpdateTopCandidates(int node_id, float distance, int cmps);
 
   // Extract 11-dimensional features from current state
   std::vector<float> ExtractFeatures();
@@ -123,12 +187,21 @@ class SearchContext {
 
   // Extract 7-dimensional traversal window statistics
   std::vector<float> GetTraversalWindowStats(const std::vector<int>& masked_ids);
+  std::array<float, 7> GetTraversalWindowStatsArrayFromSortedWindow(
+      const std::vector<std::pair<int, float>>& sorted_window,
+      const std::vector<int>& masked_ids);
+  std::vector<float> GetTraversalWindowStatsFromSortedWindow(
+      const std::vector<std::pair<int, float>>& sorted_window,
+      const std::vector<int>& masked_ids);
 
   // Predict with 11-dimensional features
   float PredictWithFeatures(const std::vector<float>& features);
+  float PredictWithFeatureArray(const std::array<float, 11>& features);
 
   // Predict recall for specific rank (Phase 4)
   float PredictRecallForRank(int idx);
+  float PredictRecallForRankWithSortedWindow(
+      int idx, const std::vector<std::pair<int, float>>& sorted_window);
 
   // Get prediction interval from interval_table
   std::pair<int, int> GetPredictionInterval(float target_recall);
@@ -138,6 +211,11 @@ class SearchContext {
 
   // Query gt_cmps_all_table (Phase 4)
   float GetRecallFromGtCmpsAllTable(int rank, int cmps);
+
+  // Scratch buffers reused on the hot prediction path to reduce allocations.
+  std::vector<std::pair<int, float>> sorted_window_scratch_;
+  std::vector<float> filtered_distances_scratch_;
+  std::vector<int> masked_ids_scratch_;
 };
 
 } // namespace omega

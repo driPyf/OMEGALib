@@ -144,6 +144,22 @@ void omega_search_report_visit(OmegaSearchHandle handle, int node_id,
   }
 }
 
+int omega_search_report_visit_candidate(OmegaSearchHandle handle, int node_id,
+                                        float distance, int should_consider) {
+  if (!handle || !handle->context) {
+    return 0;
+  }
+
+  try {
+    return handle->context->ReportVisitCandidate(node_id, distance,
+                                                 should_consider != 0)
+               ? 1
+               : 0;
+  } catch (...) {
+    return 0;
+  }
+}
+
 void omega_search_report_hop(OmegaSearchHandle handle) {
   if (!handle || !handle->context) {
     return;
@@ -189,6 +205,75 @@ void omega_search_get_stats(OmegaSearchHandle handle, int* hops,
 
   try {
     handle->context->GetStats(hops, comparisons, collected_gt);
+  } catch (...) {
+    // Ignore exceptions
+  }
+}
+
+void omega_search_get_debug_stats(OmegaSearchHandle handle,
+                                  float* predicted_recall_avg,
+                                  float* predicted_recall_at_target,
+                                  int* early_stop_hit,
+                                  unsigned long long* should_stop_calls,
+                                  unsigned long long* prediction_calls,
+                                  unsigned long long* should_stop_time_ns,
+                                  unsigned long long* prediction_eval_time_ns,
+                                  unsigned long long* sorted_window_time_ns,
+                                  unsigned long long* average_recall_eval_time_ns,
+                                  unsigned long long* prediction_feature_prep_time_ns,
+                                  unsigned long long* collected_gt_advance_count,
+                                  unsigned long long* should_stop_calls_with_advance,
+                                  unsigned long long* max_prediction_calls_per_should_stop) {
+  if (!handle || !handle->context) {
+    return;
+  }
+
+  try {
+    if (predicted_recall_avg) {
+      *predicted_recall_avg = handle->context->GetLastPredictedRecallAvg();
+    }
+    if (predicted_recall_at_target) {
+      *predicted_recall_at_target =
+          handle->context->GetLastPredictedRecallAtTarget();
+    }
+    if (early_stop_hit) {
+      *early_stop_hit = handle->context->EarlyStopHit() ? 1 : 0;
+    }
+    if (should_stop_calls) {
+      *should_stop_calls = handle->context->GetShouldStopCalls();
+    }
+    if (prediction_calls) {
+      *prediction_calls = handle->context->GetPredictionCalls();
+    }
+    if (should_stop_time_ns) {
+      *should_stop_time_ns = handle->context->GetShouldStopTimeNs();
+    }
+    if (prediction_eval_time_ns) {
+      *prediction_eval_time_ns = handle->context->GetPredictionEvalTimeNs();
+    }
+    if (sorted_window_time_ns) {
+      *sorted_window_time_ns = handle->context->GetSortedWindowTimeNs();
+    }
+    if (average_recall_eval_time_ns) {
+      *average_recall_eval_time_ns =
+          handle->context->GetAverageRecallEvalTimeNs();
+    }
+    if (prediction_feature_prep_time_ns) {
+      *prediction_feature_prep_time_ns =
+          handle->context->GetPredictionFeaturePrepTimeNs();
+    }
+    if (collected_gt_advance_count) {
+      *collected_gt_advance_count =
+          handle->context->GetCollectedGtAdvanceCount();
+    }
+    if (should_stop_calls_with_advance) {
+      *should_stop_calls_with_advance =
+          handle->context->GetShouldStopCallsWithAdvance();
+    }
+    if (max_prediction_calls_per_should_stop) {
+      *max_prediction_calls_per_should_stop =
+          handle->context->GetMaxPredictionCallsPerShouldStop();
+    }
   } catch (...) {
     // Ignore exceptions
   }
@@ -260,6 +345,46 @@ size_t omega_search_get_training_records_count(OmegaSearchHandle handle) {
 
   try {
     return handle->context->GetTrainingRecords().size();
+  } catch (...) {
+    return 0;
+  }
+}
+
+const int* omega_search_get_gt_cmps(OmegaSearchHandle handle) {
+  if (!handle || !handle->context) {
+    return nullptr;
+  }
+
+  try {
+    const auto& gt_cmps = handle->context->GetGtCmpsPerRank();
+    if (gt_cmps.empty()) {
+      return nullptr;
+    }
+    return gt_cmps.data();
+  } catch (...) {
+    return nullptr;
+  }
+}
+
+size_t omega_search_get_gt_cmps_count(OmegaSearchHandle handle) {
+  if (!handle || !handle->context) {
+    return 0;
+  }
+
+  try {
+    return handle->context->GetGtCmpsPerRank().size();
+  } catch (...) {
+    return 0;
+  }
+}
+
+int omega_search_get_total_cmps(OmegaSearchHandle handle) {
+  if (!handle || !handle->context) {
+    return 0;
+  }
+
+  try {
+    return handle->context->GetTotalCmps();
   } catch (...) {
     return 0;
   }

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "omega/model_manager.h"
+#include <cmath>
 #include <fstream>
 #include <sstream>
 
@@ -79,10 +80,19 @@ bool ModelManager::LoadThresholdTable(const std::string& path) {
       continue;  // Skip empty lines and comments
     }
 
-    int key;
-    float value;
-    if (ParseKeyValue(line, &key, &value)) {
-      tables_->threshold_table[key] = value;
+    std::istringstream iss(line);
+    std::string threshold_str;
+    std::string recall_str;
+    if (!std::getline(iss, threshold_str, ',') || !std::getline(iss, recall_str)) {
+      continue;
+    }
+
+    try {
+      float threshold = std::stof(threshold_str);
+      float recall = std::stof(recall_str);
+      tables_->threshold_table[static_cast<int>(std::round(threshold * 10000.0f))] = recall;
+    } catch (...) {
+      continue;
     }
   }
 
@@ -101,9 +111,23 @@ bool ModelManager::LoadIntervalTable(const std::string& path) {
       continue;
     }
 
-    int key, value1, value2;
-    if (ParseKeyValuePair(line, &key, &value1, &value2)) {
+    std::istringstream iss(line);
+    std::string recall_str;
+    std::string initial_str;
+    std::string min_str;
+    if (!std::getline(iss, recall_str, ',') ||
+        !std::getline(iss, initial_str, ',') ||
+        !std::getline(iss, min_str)) {
+      continue;
+    }
+
+    try {
+      int key = static_cast<int>(std::round(std::stof(recall_str) * 100.0f));
+      int value1 = std::stoi(initial_str);
+      int value2 = std::stoi(min_str);
       tables_->interval_table[key] = std::make_pair(value1, value2);
+    } catch (...) {
+      continue;
     }
   }
 
@@ -122,10 +146,19 @@ bool ModelManager::LoadMultiplierTable(const std::string& path) {
       continue;
     }
 
-    int key;
-    float value;
-    if (ParseKeyValue(line, &key, &value)) {
+    std::istringstream iss(line);
+    std::string recall_str;
+    std::string multiplier_str;
+    if (!std::getline(iss, recall_str, ',') || !std::getline(iss, multiplier_str)) {
+      continue;
+    }
+
+    try {
+      int key = static_cast<int>(std::round(std::stof(recall_str) * 100.0f));
+      float value = std::stof(multiplier_str);
       tables_->multiplier_table[key] = value;
+    } catch (...) {
+      continue;
     }
   }
 
@@ -279,4 +312,3 @@ bool ModelManager::Parse2DTableLine(const std::string& line, int* row_index,
 }
 
 } // namespace omega
-

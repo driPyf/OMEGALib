@@ -14,6 +14,8 @@
 
 #include "omega/search_context.h"
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cmath>
 #include <limits>
 
@@ -34,8 +36,21 @@ SearchContext::SearchContext(const GBDTModel* model, const ModelTables* tables,
       dist_1st_(std::numeric_limits<float>::max()),
       collected_gt_(0),
       next_prediction_cmps_(50),
+      last_predicted_recall_avg_(0.0f),
+      last_predicted_recall_at_target_(0.0f),
+      early_stop_hit_(false),
       training_mode_enabled_(false),  // Phase 5: Training mode disabled by default
-      current_query_id_(-1) {  // Phase 5: No query ID initially
+      current_query_id_(-1),
+      should_stop_calls_(0),
+      prediction_calls_(0),
+      should_stop_time_ns_(0),
+      prediction_eval_time_ns_(0),
+      sorted_window_time_ns_(0),
+      average_recall_eval_time_ns_(0),
+      prediction_feature_prep_time_ns_(0),
+      collected_gt_advance_count_(0),
+      should_stop_calls_with_advance_(0),
+      max_prediction_calls_per_should_stop_(0) {  // Phase 5: No query ID initially
   // Get initial prediction interval from interval_table
   auto interval = GetPredictionInterval(target_recall);
   next_prediction_cmps_ = interval.first;  // initial_interval
@@ -48,14 +63,26 @@ SearchContext::~SearchContext() = default;
 
 void SearchContext::Reset() {
   traversal_window_.clear();
-  topk_node_ids_.clear();
-  topk_node_ids_ordered_.clear();  // Phase 4: Clear ordered candidate list
+  top_candidates_.clear();
   hops_ = 0;
   comparisons_ = 0;
   dist_start_ = std::numeric_limits<float>::max();
   dist_1st_ = std::numeric_limits<float>::max();
   collected_gt_ = 0;
   traversal_window_stats_cache_.clear();  // Clear stats cache
+  last_predicted_recall_avg_ = 0.0f;
+  last_predicted_recall_at_target_ = 0.0f;
+  early_stop_hit_ = false;
+  should_stop_calls_ = 0;
+  prediction_calls_ = 0;
+  should_stop_time_ns_ = 0;
+  prediction_eval_time_ns_ = 0;
+  sorted_window_time_ns_ = 0;
+  average_recall_eval_time_ns_ = 0;
+  prediction_feature_prep_time_ns_ = 0;
+  collected_gt_advance_count_ = 0;
+  should_stop_calls_with_advance_ = 0;
+  max_prediction_calls_per_should_stop_ = 0;
 
   // Reset prediction interval
   auto interval = GetPredictionInterval(target_recall_);
@@ -63,6 +90,36 @@ void SearchContext::Reset() {
 
   // Phase 4: Re-initialize Weighted BH for new query
   InitializeWeightedBH();
+}
+
+bool SearchContext::UpdateTopCandidates(int node_id, float distance, int cmps) {
+  TopCandidate candidate{node_id, distance, cmps};
+  auto pos = std::lower_bound(
+      top_candidates_.begin(), top_candidates_.end(), candidate,
+      [](const TopCandidate& lhs, const TopCandidate& rhs) {
+        if (lhs.distance != rhs.distance) {
+          return lhs.distance < rhs.distance;
+        }
+        return lhs.id < rhs.id;
+      });
+
+  if (static_cast<int>(top_candidates_.size()) == k_) {
+    const auto& worst = top_candidates_.back();
+    if (worst.distance < distance ||
+        (worst.distance == distance && worst.id <= node_id)) {
+      return false;
+    }
+  }
+
+  top_candidates_.insert(pos, candidate);
+
+  if (static_cast<int>(top_candidates_.size()) > k_) {
+    top_candidates_.pop_back();
+  }
+
+  dist_1st_ = top_candidates_.empty() ? std::numeric_limits<float>::max()
+                                      : top_candidates_.front().distance;
+  return true;
 }
 
 void SearchContext::ReportVisit(int node_id, float distance, bool is_in_topk) {
@@ -76,12 +133,22 @@ void SearchContext::ReportVisit(int node_id, float distance, bool is_in_topk) {
 
   // Update topk tracking
   if (is_in_topk) {
-    topk_node_ids_.insert(node_id);
-    topk_node_ids_ordered_.push_back(node_id);  // Phase 4: Track insertion order
+    UpdateTopCandidates(node_id, distance, comparisons_);
 
-    // Update dist_1st (best distance in topk)
-    if (distance < dist_1st_) {
-      dist_1st_ = distance;
+    // Track gt_cmps for each GT rank when the GT node first enters topk
+    if (training_mode_enabled_ && !ground_truth_.empty()) {
+      // Check if this node is a GT node and hasn't been found yet
+      if (gt_found_set_.find(node_id) == gt_found_set_.end()) {
+        // Check which GT rank(s) this node corresponds to
+        for (size_t rank = 0; rank < ground_truth_.size(); ++rank) {
+          if (ground_truth_[rank] == node_id) {
+            // Record the cmps when this GT rank was found
+            gt_cmps_per_rank_[rank] = comparisons_;
+            gt_found_set_.insert(node_id);
+            break;  // Each node_id can only match one GT rank
+          }
+        }
+      }
     }
   }
 
@@ -104,14 +171,18 @@ void SearchContext::ReportVisit(int node_id, float distance, bool is_in_topk) {
       record.traversal_window_stats = std::vector<float>(7, 0.0f);
     }
 
-    // Compute label in real-time: check if top k_train_ ground truth nodes are all in topk
-    // Label = 1 iff ALL top k_train_ GT nodes are found in current topk_node_ids_
+    // Match the reference generate_training_data.py semantics:
+    // label becomes 1 once the first k_train ground-truth items have all been
+    // collected at least once by the current comparison count. This is
+    // monotonic in cmps and does not require the GT items to remain in top-k.
     record.label = 0;
     if (!ground_truth_.empty()) {
       size_t actual_k = std::min(static_cast<size_t>(k_train_), ground_truth_.size());
       bool all_found = true;
       for (size_t i = 0; i < actual_k && all_found; ++i) {
-        if (topk_node_ids_.find(ground_truth_[i]) == topk_node_ids_.end()) {
+        if (i >= gt_cmps_per_rank_.size() ||
+            gt_cmps_per_rank_[i] < 0 ||
+            comparisons_ < gt_cmps_per_rank_[i]) {
           all_found = false;
         }
       }
@@ -120,6 +191,65 @@ void SearchContext::ReportVisit(int node_id, float distance, bool is_in_topk) {
 
     training_records_.push_back(record);
   }
+}
+
+bool SearchContext::ReportVisitCandidate(int node_id, float distance,
+                                         bool should_consider) {
+  comparisons_++;
+
+  traversal_window_.push_back({node_id, distance});
+  if (traversal_window_.size() > static_cast<size_t>(window_size_)) {
+    traversal_window_.pop_front();
+  }
+
+  bool inserted_into_topk = false;
+  if (should_consider) {
+    inserted_into_topk = UpdateTopCandidates(node_id, distance, comparisons_);
+
+    if (inserted_into_topk && training_mode_enabled_ && !ground_truth_.empty() &&
+        gt_found_set_.find(node_id) == gt_found_set_.end()) {
+      for (size_t rank = 0; rank < ground_truth_.size(); ++rank) {
+        if (ground_truth_[rank] == node_id) {
+          gt_cmps_per_rank_[rank] = comparisons_;
+          gt_found_set_.insert(node_id);
+          break;
+        }
+      }
+    }
+  }
+
+  if (training_mode_enabled_) {
+    TrainingRecord record;
+    record.query_id = current_query_id_;
+    record.hops = hops_;
+    record.cmps = comparisons_;
+    record.dist_1st = dist_1st_;
+    record.dist_start = dist_start_;
+
+    if (traversal_window_stats_cache_.size() == 7) {
+      record.traversal_window_stats = traversal_window_stats_cache_;
+    } else {
+      record.traversal_window_stats = std::vector<float>(7, 0.0f);
+    }
+
+    record.label = 0;
+    if (!ground_truth_.empty()) {
+      size_t actual_k =
+          std::min(static_cast<size_t>(k_train_), ground_truth_.size());
+      bool all_found = true;
+      for (size_t i = 0; i < actual_k && all_found; ++i) {
+        if (i >= gt_cmps_per_rank_.size() || gt_cmps_per_rank_[i] < 0 ||
+            comparisons_ < gt_cmps_per_rank_[i]) {
+          all_found = false;
+        }
+      }
+      record.label = all_found ? 1 : 0;
+    }
+
+    training_records_.push_back(record);
+  }
+
+  return inserted_into_topk;
 }
 
 void SearchContext::ReportHop() {
@@ -132,10 +262,6 @@ void SearchContext::ReportHop() {
   // instead of O(window_size * log(window_size)) per visit
   if (training_mode_enabled_) {
     std::vector<int> masked_ids;  // Empty for training mode (like original OMEGA)
-    auto traversal_window_sorted = std::vector<std::pair<int, float>>(
-        traversal_window_.begin(), traversal_window_.end());
-    std::sort(traversal_window_sorted.begin(), traversal_window_sorted.end(),
-              [](const auto& a, const auto& b) { return a.second < b.second; });
     traversal_window_stats_cache_ = GetTraversalWindowStats(masked_ids);
   }
 }
@@ -143,7 +269,7 @@ void SearchContext::ReportHop() {
 bool SearchContext::ShouldPredict() const {
   // Check if we have enough results and reached prediction point
   return comparisons_ >= next_prediction_cmps_ &&
-         static_cast<int>(topk_node_ids_.size()) >= k_;
+         static_cast<int>(top_candidates_.size()) >= k_;
 }
 
 void SearchContext::GetStats(int* hops, int* comparisons, int* collected_gt) const {
@@ -153,24 +279,61 @@ void SearchContext::GetStats(int* hops, int* comparisons, int* collected_gt) con
 }
 
 bool SearchContext::ShouldStopEarly() {
+  ++should_stop_calls_;
+  auto should_stop_start = std::chrono::steady_clock::now();
+  uint64_t predictions_before = prediction_calls_;
+  bool collected_gt_advanced_in_call = false;
+
   if (!model_ || !tables_) {
+    should_stop_time_ns_ +=
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - should_stop_start)
+            .count();
     return false;  // No model, can't make decision
   }
 
   // Phase 4: collected_gt iteration with per-K prediction
-  if (use_weighted_bh_ && static_cast<int>(topk_node_ids_ordered_.size()) >= k_) {
+  if (use_weighted_bh_ && static_cast<int>(top_candidates_.size()) >= k_) {
+    auto sorted_window_start = std::chrono::steady_clock::now();
+    std::vector<std::pair<int, float>> sorted_window(
+        traversal_window_.begin(), traversal_window_.end());
+    std::sort(sorted_window.begin(), sorted_window.end(),
+              [](const auto& a, const auto& b) { return a.second < b.second; });
+    sorted_window_time_ns_ +=
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - sorted_window_start)
+            .count();
+
     // Step 1: Update collected_gt using per-K prediction
     bool collected_gt_has_changed = false;
     float predicted_recall_at_target = 0.0f;
+    last_predicted_recall_avg_ = 0.0f;
 
     while (true) {
       int idx = std::min(collected_gt_ + k_train_ - 1, k_ - 1);
-      predicted_recall_at_target = PredictRecallForRank(idx);
+      ++prediction_calls_;
+      predicted_recall_at_target =
+          PredictRecallForRankWithSortedWindow(idx, sorted_window);
+      last_predicted_recall_at_target_ = predicted_recall_at_target;
 
       if (predicted_recall_at_target >= recall_targets_[idx]) {
         collected_gt_has_changed = true;
+        collected_gt_advanced_in_call = true;
         collected_gt_ += k_train_;
+        collected_gt_advance_count_ += k_train_;
         if (collected_gt_ >= k_) {
+          early_stop_hit_ = true;
+          last_predicted_recall_avg_ = 1.0f;
+          if (collected_gt_advanced_in_call) {
+            ++should_stop_calls_with_advance_;
+          }
+          max_prediction_calls_per_should_stop_ =
+              std::max(max_prediction_calls_per_should_stop_,
+                       prediction_calls_ - predictions_before);
+          should_stop_time_ns_ +=
+              std::chrono::duration_cast<std::chrono::nanoseconds>(
+                  std::chrono::steady_clock::now() - should_stop_start)
+                  .count();
           return true;  // All K results confirmed!
         }
       } else {
@@ -180,6 +343,7 @@ bool SearchContext::ShouldStopEarly() {
 
     // Step 2: Compute average recall if collected_gt changed
     if (collected_gt_has_changed) {
+      auto avg_eval_start = std::chrono::steady_clock::now();
       double predicted_recall_avg = 0.0;
       for (int i = 1; i <= k_; i++) {
         if (i <= collected_gt_) {
@@ -191,10 +355,42 @@ bool SearchContext::ShouldStopEarly() {
         }
       }
       predicted_recall_avg /= k_;
+      last_predicted_recall_avg_ = static_cast<float>(predicted_recall_avg);
+      average_recall_eval_time_ns_ +=
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - avg_eval_start)
+              .count();
 
       if (predicted_recall_avg >= target_recall_) {
+        early_stop_hit_ = true;
+        ++should_stop_calls_with_advance_;
+        max_prediction_calls_per_should_stop_ =
+            std::max(max_prediction_calls_per_should_stop_,
+                     prediction_calls_ - predictions_before);
+        should_stop_time_ns_ +=
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - should_stop_start)
+                .count();
         return true;  // Early stop!
       }
+
+      auto interval = GetPredictionInterval(target_recall_);
+      int min_interval = interval.second;
+      int initial_interval = interval.first;
+      float recall_gap = target_recall_ - static_cast<float>(predicted_recall_avg);
+      int interval_adjustment = static_cast<int>(
+          min_interval +
+          (initial_interval - min_interval) * std::max(0.0f, recall_gap));
+      next_prediction_cmps_ = comparisons_ + interval_adjustment;
+      ++should_stop_calls_with_advance_;
+      max_prediction_calls_per_should_stop_ =
+          std::max(max_prediction_calls_per_should_stop_,
+                   prediction_calls_ - predictions_before);
+      should_stop_time_ns_ +=
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - should_stop_start)
+              .count();
+      return false;
     }
 
     // Update next prediction interval for next iteration
@@ -207,6 +403,13 @@ bool SearchContext::ShouldStopEarly() {
       next_prediction_cmps_ = comparisons_ + interval_adjustment;
     }
 
+    max_prediction_calls_per_should_stop_ =
+        std::max(max_prediction_calls_per_should_stop_,
+                 prediction_calls_ - predictions_before);
+    should_stop_time_ns_ +=
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - should_stop_start)
+            .count();
     return false;
   }
 
@@ -214,10 +417,17 @@ bool SearchContext::ShouldStopEarly() {
   // Extract features and predict
   std::vector<float> features = ExtractFeatures();
   if (features.empty()) {
+    should_stop_time_ns_ +=
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - should_stop_start)
+            .count();
     return false;  // Not enough data yet
   }
 
+  ++prediction_calls_;
   float predicted_recall = PredictWithFeatures(features);
+  last_predicted_recall_at_target_ = predicted_recall;
+  last_predicted_recall_avg_ = predicted_recall;
 
   // Update next prediction point based on current recall
   auto interval = GetPredictionInterval(target_recall_);
@@ -231,10 +441,22 @@ bool SearchContext::ShouldStopEarly() {
   next_prediction_cmps_ = comparisons_ + interval_adjustment;
 
   // Update collected_gt based on topk
-  collected_gt_ = static_cast<int>(topk_node_ids_.size());
+  collected_gt_ = static_cast<int>(top_candidates_.size());
 
   // Stop if we've reached target recall
-  return predicted_recall >= target_recall_;
+  if (predicted_recall >= target_recall_) {
+    early_stop_hit_ = true;
+    should_stop_time_ns_ +=
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - should_stop_start)
+            .count();
+    return true;
+  }
+  should_stop_time_ns_ +=
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now() - should_stop_start)
+          .count();
+  return false;
 }
 
 std::vector<float> SearchContext::ExtractFeatures() {
@@ -254,8 +476,11 @@ std::vector<float> SearchContext::ExtractFeatures() {
 
   // Get 7-dim traversal window statistics
   // masked_ids: nodes already in topk (for per-K prediction)
-  std::vector<int> masked_ids(topk_node_ids_.begin(), topk_node_ids_.end());
-  std::sort(masked_ids.begin(), masked_ids.end());
+  std::vector<int> masked_ids;
+  masked_ids.reserve(top_candidates_.size());
+  for (const auto& candidate : top_candidates_) {
+    masked_ids.push_back(candidate.id);
+  }
 
   std::vector<float> window_stats = GetTraversalWindowStats(masked_ids);
 
@@ -274,27 +499,29 @@ std::vector<float> SearchContext::GetTraversalWindowStats(
       traversal_window_.begin(), traversal_window_.end());
   std::sort(sorted_window.begin(), sorted_window.end(),
             [](const auto& a, const auto& b) { return a.second < b.second; });
+  return GetTraversalWindowStatsFromSortedWindow(sorted_window, masked_ids);
+}
 
+std::array<float, 7> SearchContext::GetTraversalWindowStatsArrayFromSortedWindow(
+    const std::vector<std::pair<int, float>>& sorted_window,
+    const std::vector<int>& masked_ids) {
   auto original_len = sorted_window.size();
   size_t len = 0;
-  std::vector<float> distances;
-  distances.reserve(original_len);
+  filtered_distances_scratch_.clear();
+  filtered_distances_scratch_.reserve(original_len);
 
-  // stats: avg, var, min, max, med, perc25, perc75
-  float avg = 0;
-  float var = 0;
+  float avg = 0.0f;
+  float var = 0.0f;
   float min = std::numeric_limits<float>::max();
-  float max = std::numeric_limits<float>::min();
+  float max = std::numeric_limits<float>::lowest();
 
   for (size_t i = 0; i < original_len; i++) {
-    // Check if this node is masked
     auto it = std::lower_bound(masked_ids.begin(), masked_ids.end(),
                                sorted_window[i].first);
-    // curr id is not masked
     if (it == masked_ids.end() || *it != sorted_window[i].first) {
-      len++;
+      ++len;
       float dist = sorted_window[i].second;
-      distances.push_back(dist);
+      filtered_distances_scratch_.push_back(dist);
       avg += dist;
       var += dist * dist;
       min = std::min(min, dist);
@@ -303,24 +530,32 @@ std::vector<float> SearchContext::GetTraversalWindowStats(
   }
 
   if (len == 0) {
-    return std::vector<float>({0, 0, 0, 0, 0, 0, 0});
+    return {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
   }
   if (len == 1) {
-    return std::vector<float>({avg, 0, avg, avg, avg, avg, avg});
+    return {avg, 0.0f, avg, avg, avg, avg, avg};
   }
 
   size_t len25 = len / 4;
   size_t len50 = len / 2;
   size_t len75 = len * 3 / 4;
 
-  float perc25 = distances[len25];
-  float med = distances[len50];
-  float perc75 = distances[len75];
+  float perc25 = filtered_distances_scratch_[len25];
+  float med = filtered_distances_scratch_[len50];
+  float perc75 = filtered_distances_scratch_[len75];
 
-  avg /= len;
-  var = var / len - avg * avg;
+  avg /= static_cast<float>(len);
+  var = var / static_cast<float>(len) - avg * avg;
 
-  return std::vector<float>({avg, var, min, max, med, perc25, perc75});
+  return {avg, var, min, max, med, perc25, perc75};
+}
+
+std::vector<float> SearchContext::GetTraversalWindowStatsFromSortedWindow(
+    const std::vector<std::pair<int, float>>& sorted_window,
+    const std::vector<int>& masked_ids) {
+  auto stats = GetTraversalWindowStatsArrayFromSortedWindow(sorted_window,
+                                                            masked_ids);
+  return std::vector<float>(stats.begin(), stats.end());
 }
 
 float SearchContext::PredictWithFeatures(const std::vector<float>& features) {
@@ -328,17 +563,45 @@ float SearchContext::PredictWithFeatures(const std::vector<float>& features) {
     return 0.0f;
   }
 
-  // Convert float features to double for model prediction
-  std::vector<double> features_double(features.begin(), features.end());
+  return PredictWithFeatureArray(
+      {features[0], features[1], features[2], features[3], features[4],
+       features[5], features[6], features[7], features[8], features[9],
+       features[10]});
+}
 
-  // Get model prediction (raw score)
-  double raw_score = model_->Predict(features_double.data(), features_double.size());
+float SearchContext::PredictWithFeatureArray(
+    const std::array<float, 11>& features) {
+  if (!model_) {
+    return 0.0f;
+  }
+
+  auto prediction_start = std::chrono::steady_clock::now();
+  auto feature_prep_start = prediction_start;
+
+  std::array<double, 11> features_double{};
+  for (size_t i = 0; i < features.size(); ++i) {
+    features_double[i] = static_cast<double>(features[i]);
+  }
+  prediction_feature_prep_time_ns_ +=
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now() - feature_prep_start)
+          .count();
+
+  // Match the reference LightGBM flow: get raw score first, then apply sigmoid
+  // exactly once before threshold-table calibration.
+  double raw_score =
+      model_->PredictRaw(features_double.data(),
+                         static_cast<int32_t>(features_double.size()));
 
   // Apply sigmoid to get probability
   double probability = 1.0 / (1.0 + std::exp(-raw_score));
 
   // Map probability to recall using threshold_table
   if (!tables_ || tables_->threshold_table.empty()) {
+    prediction_eval_time_ns_ +=
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - prediction_start)
+            .count();
     return static_cast<float>(probability);
   }
 
@@ -351,6 +614,10 @@ float SearchContext::PredictWithFeatures(const std::vector<float>& features) {
     --it;
   }
 
+  prediction_eval_time_ns_ +=
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now() - prediction_start)
+          .count();
   return it->second;
 }
 
@@ -403,17 +670,24 @@ void SearchContext::InitializeWeightedBH() {
 
 // Phase 4: Extract features for specific rank (per-K prediction)
 std::vector<float> SearchContext::ExtractFeaturesForRank(int idx) {
+  if (idx < 0 || idx >= static_cast<int>(top_candidates_.size())) {
+    return std::vector<float>();
+  }
+
   std::vector<float> features(11);
   features[0] = static_cast<float>(hops_);
-  features[1] = static_cast<float>(comparisons_ - idx);  // Key: cmps - idx
-  features[2] = dist_1st_;
+  features[1] = static_cast<float>(comparisons_ - idx);
+  features[2] = top_candidates_[idx].distance;
   features[3] = dist_start_;
 
   // Compute masked_ids: all candidates before idx
   std::vector<int> masked_ids;
-  for (int i = 0; i < idx && i < static_cast<int>(topk_node_ids_ordered_.size()); i++) {
-    if (comparisons_ - i <= window_size_) {
-      masked_ids.push_back(topk_node_ids_ordered_[i]);
+  for (int prev_idx = 0;
+       prev_idx + k_train_ - 1 < idx &&
+       prev_idx < static_cast<int>(top_candidates_.size());
+       ++prev_idx) {
+    if (comparisons_ - top_candidates_[prev_idx].cmps <= window_size_) {
+      masked_ids.push_back(top_candidates_[prev_idx].id);
     }
   }
   std::sort(masked_ids.begin(), masked_ids.end());
@@ -427,12 +701,47 @@ std::vector<float> SearchContext::ExtractFeaturesForRank(int idx) {
 
 // Phase 4: Predict recall for specific rank
 float SearchContext::PredictRecallForRank(int idx) {
-  if (!model_ || idx >= k_) {
+  if (!model_ || idx < 0 || idx >= static_cast<int>(top_candidates_.size())) {
     return 0.0f;
   }
 
-  std::vector<float> features = ExtractFeaturesForRank(idx);
-  return PredictWithFeatures(features);
+  sorted_window_scratch_.assign(traversal_window_.begin(), traversal_window_.end());
+  std::sort(sorted_window_scratch_.begin(), sorted_window_scratch_.end(),
+            [](const auto& a, const auto& b) { return a.second < b.second; });
+
+  return PredictRecallForRankWithSortedWindow(idx, sorted_window_scratch_);
+}
+
+float SearchContext::PredictRecallForRankWithSortedWindow(
+    int idx, const std::vector<std::pair<int, float>>& sorted_window) {
+  if (!model_ || idx < 0 || idx >= static_cast<int>(top_candidates_.size())) {
+    return 0.0f;
+  }
+
+  std::array<float, 11> features{};
+  features[0] = static_cast<float>(hops_);
+  features[1] = static_cast<float>(comparisons_ - idx);
+  features[2] = top_candidates_[idx].distance;
+  features[3] = dist_start_;
+
+  masked_ids_scratch_.clear();
+  for (int prev_idx = 0;
+       prev_idx + k_train_ - 1 < idx &&
+       prev_idx < static_cast<int>(top_candidates_.size());
+       ++prev_idx) {
+    if (comparisons_ - top_candidates_[prev_idx].cmps <= window_size_) {
+      masked_ids_scratch_.push_back(top_candidates_[prev_idx].id);
+    }
+  }
+  std::sort(masked_ids_scratch_.begin(), masked_ids_scratch_.end());
+
+  auto window_stats =
+      GetTraversalWindowStatsArrayFromSortedWindow(sorted_window,
+                                                   masked_ids_scratch_);
+  for (size_t i = 0; i < window_stats.size(); ++i) {
+    features[4 + i] = window_stats[i];
+  }
+  return PredictWithFeatureArray(features);
 }
 
 // Phase 4: Query gt_collected_table
@@ -455,11 +764,12 @@ float SearchContext::GetRecallFromGtCollectedTable(int collected, int rank) {
   }
 
   const std::vector<float>& row = it->second;
-  if (rank < 0 || rank >= static_cast<int>(row.size())) {
+  int rank_idx = rank - 1;
+  if (rank_idx < 0 || rank_idx >= static_cast<int>(row.size())) {
     return 0.0f;  // Out of bounds
   }
 
-  return row[rank];
+  return row[rank_idx];
 }
 
 // Phase 4: Query gt_cmps_all_table
@@ -480,22 +790,12 @@ float SearchContext::GetRecallFromGtCmpsAllTable(int rank, int cmps) {
     return 0.0f;
   }
 
-  // Binary search to find the percentile that matches the cmps value
-  // percentiles array contains cmps values at percentiles 1%, 2%, ..., 100%
-  // We want to find the highest percentile where cmps_value <= our cmps
-
-  // Find the first percentile where cmps_value > our cmps
-  auto upper = std::upper_bound(percentiles.begin(), percentiles.end(), static_cast<float>(cmps));
-
-  if (upper == percentiles.begin()) {
-    // cmps is less than the 1st percentile
-    return 0.0f;
+  auto lower = std::lower_bound(percentiles.begin(), percentiles.end(),
+                                static_cast<float>(cmps));
+  size_t percentile_idx = std::distance(percentiles.begin(), lower) + 1;
+  if (percentile_idx > percentiles.size()) {
+    percentile_idx = percentiles.size();
   }
-
-  // Calculate the percentile (1-based)
-  size_t percentile_idx = std::distance(percentiles.begin(), upper);
-
-  // Return the percentile as a fraction (0.0 to 1.0)
   return static_cast<float>(percentile_idx) / 100.0f;
 }
 
@@ -506,6 +806,12 @@ void SearchContext::EnableTrainingMode(int query_id, const std::vector<int>& gro
   ground_truth_ = ground_truth;
   k_train_ = k_train;
   traversal_window_stats_cache_.clear();  // Clear cache for new query
+  top_candidates_.clear();
+  dist_1st_ = std::numeric_limits<float>::max();
+
+  // Initialize gt_cmps_per_rank with -1 (will be set to total_cmps at end if not found)
+  gt_cmps_per_rank_.assign(ground_truth.size(), -1);
+  gt_found_set_.clear();
 }
 
 // Phase 5: Disable training mode
@@ -513,6 +819,8 @@ void SearchContext::DisableTrainingMode() {
   training_mode_enabled_ = false;
   current_query_id_ = -1;
   ground_truth_.clear();
+  gt_cmps_per_rank_.clear();
+  gt_found_set_.clear();
 }
 
 } // namespace omega

@@ -84,6 +84,7 @@ class OmegaTrainer {
    */
   static void PrepareData(
       const std::vector<TrainingRecord>& records,
+      std::vector<int>& query_ids,
       std::vector<float>& features,
       std::vector<float>& labels,
       int& num_samples,

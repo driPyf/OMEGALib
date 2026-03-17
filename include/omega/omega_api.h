@@ -83,6 +83,18 @@ void omega_search_set_dist_start(OmegaSearchHandle handle, float dist_start);
 void omega_search_report_visit(OmegaSearchHandle handle, int node_id,
                                float distance, int is_in_topk);
 
+// Report a node visit and let OMEGA maintain the result-set top-k internally.
+// Parameters:
+//   handle: Search context handle
+//   node_id: ID of the visited node
+//   distance: Distance to the visited node
+//   should_consider: 1 if the HNSW ef-heap logic says this candidate should be
+//                    considered for insertion, 0 otherwise
+// Returns:
+//   1 if inserted into the current result-set top-k, 0 otherwise
+int omega_search_report_visit_candidate(OmegaSearchHandle handle, int node_id,
+                                        float distance, int should_consider);
+
 // Report a hop during search (stateful interface)
 // Parameters:
 //   handle: Search context handle
@@ -109,6 +121,27 @@ int omega_search_should_stop(OmegaSearchHandle handle);
 //   collected_gt: Output pointer for collected ground truth count (can be NULL)
 void omega_search_get_stats(OmegaSearchHandle handle, int* hops,
                            int* comparisons, int* collected_gt);
+
+// Get OMEGA debug statistics for the current search state.
+// Parameters:
+//   handle: Search context handle
+//   predicted_recall_avg: Output pointer for latest predicted recall average
+//   predicted_recall_at_target: Output pointer for latest rank-target prediction
+//   early_stop_hit: Output pointer for whether early stop has triggered
+void omega_search_get_debug_stats(OmegaSearchHandle handle,
+                                  float* predicted_recall_avg,
+                                  float* predicted_recall_at_target,
+                                  int* early_stop_hit,
+                                  unsigned long long* should_stop_calls,
+                                  unsigned long long* prediction_calls,
+                                  unsigned long long* should_stop_time_ns,
+                                  unsigned long long* prediction_eval_time_ns,
+                                  unsigned long long* sorted_window_time_ns,
+                                  unsigned long long* average_recall_eval_time_ns,
+                                  unsigned long long* prediction_feature_prep_time_ns,
+                                  unsigned long long* collected_gt_advance_count,
+                                  unsigned long long* should_stop_calls_with_advance,
+                                  unsigned long long* max_prediction_calls_per_should_stop);
 
 // Destroy search context and free resources
 // Parameters:
@@ -143,6 +176,25 @@ const void* omega_search_get_training_records(OmegaSearchHandle handle);
 //   handle: Search context handle
 // Returns: Number of training records
 size_t omega_search_get_training_records_count(OmegaSearchHandle handle);
+
+// Get gt_cmps data for this query (cmps value when each GT rank was found)
+// Parameters:
+//   handle: Search context handle
+// Returns: Pointer to array of int, size = ground_truth count
+//          Value -1 means GT rank was not found (use total_cmps instead)
+const int* omega_search_get_gt_cmps(OmegaSearchHandle handle);
+
+// Get count of gt_cmps array
+// Parameters:
+//   handle: Search context handle
+// Returns: Number of elements in gt_cmps array (same as ground_truth count)
+size_t omega_search_get_gt_cmps_count(OmegaSearchHandle handle);
+
+// Get total cmps for this search (useful for unfound GT ranks)
+// Parameters:
+//   handle: Search context handle
+// Returns: Total comparison count
+int omega_search_get_total_cmps(OmegaSearchHandle handle);
 
 #ifdef __cplusplus
 }

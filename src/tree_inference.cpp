@@ -15,37 +15,44 @@
 #include "omega/tree_inference.h"
 #include <cmath>
 #include <cstdio>
-#include <cstring>
 
 namespace omega {
 
-GBDTModel::GBDTModel() : booster_(nullptr), num_features_(0), num_iterations_(0) {}
+GBDTModel::GBDTModel()
+    : boosting_(nullptr),
+      tree_early_stop_(
+          LightGBM::CreatePredictionEarlyStopInstance(
+              std::string("none"), LightGBM::PredictionEarlyStopConfig())),
+      num_features_(0),
+      num_iterations_(0) {}
 
 GBDTModel::~GBDTModel() {
-  if (booster_ != nullptr) {
-    LGBM_BoosterFree(booster_);
-    booster_ = nullptr;
+  if (boosting_ != nullptr) {
+    delete boosting_;
+    boosting_ = nullptr;
   }
 }
 
 GBDTModel::GBDTModel(GBDTModel&& other) noexcept
-    : booster_(other.booster_),
+    : boosting_(other.boosting_),
+      tree_early_stop_(std::move(other.tree_early_stop_)),
       num_features_(other.num_features_),
       num_iterations_(other.num_iterations_) {
-  other.booster_ = nullptr;
+  other.boosting_ = nullptr;
   other.num_features_ = 0;
   other.num_iterations_ = 0;
 }
 
 GBDTModel& GBDTModel::operator=(GBDTModel&& other) noexcept {
   if (this != &other) {
-    if (booster_ != nullptr) {
-      LGBM_BoosterFree(booster_);
+    if (boosting_ != nullptr) {
+      delete boosting_;
     }
-    booster_ = other.booster_;
+    boosting_ = other.boosting_;
+    tree_early_stop_ = std::move(other.tree_early_stop_);
     num_features_ = other.num_features_;
     num_iterations_ = other.num_iterations_;
-    other.booster_ = nullptr;
+    other.boosting_ = nullptr;
     other.num_features_ = 0;
     other.num_iterations_ = 0;
   }
@@ -59,78 +66,46 @@ double GBDTModel::Predict(const double* features, int32_t num_features) const {
 }
 
 double GBDTModel::PredictRaw(const double* features, int32_t num_features) const {
-  if (booster_ == nullptr) {
+  if (boosting_ == nullptr || features == nullptr || num_features <= 0) {
     return 0.0;
   }
 
-  int64_t out_len = 0;
   double out_result = 0.0;
-
-  // Use LGBM_BoosterPredictForMatSingleRow for single sample prediction
-  int ret = LGBM_BoosterPredictForMatSingleRow(
-      booster_,
-      features,
-      C_API_DTYPE_FLOAT64,
-      num_features,
-      1,  // is_row_major
-      C_API_PREDICT_RAW_SCORE,  // predict_type: raw score (before sigmoid)
-      0,  // start_iteration
-      -1,  // num_iteration: -1 means use all iterations
-      "",  // parameter (empty string for defaults)
-      &out_len,
-      &out_result);
-
-  if (ret != 0) {
-    fprintf(stderr, "LightGBM prediction error: %s\n", LGBM_GetLastError());
-    return 0.0;
-  }
-
+  boosting_->PredictRaw(features, &out_result, &tree_early_stop_);
   return out_result;
 }
 
 bool GBDTModel::LoadFromFile(const std::string& file_path) {
-  // Free existing booster if any
-  if (booster_ != nullptr) {
-    LGBM_BoosterFree(booster_);
-    booster_ = nullptr;
+  if (boosting_ != nullptr) {
+    delete boosting_;
+    boosting_ = nullptr;
   }
 
-  int ret = LGBM_BoosterCreateFromModelfile(file_path.c_str(), &num_iterations_, &booster_);
-  if (ret != 0) {
-    fprintf(stderr, "Failed to load LightGBM model from %s: %s\n",
-            file_path.c_str(), LGBM_GetLastError());
-    booster_ = nullptr;
+  boosting_ = LightGBM::Boosting::CreateBoosting(
+      std::string("gbdt"), file_path.c_str(), std::string("cpu"), 0);
+  if (boosting_ == nullptr) {
+    fprintf(stderr, "Failed to create LightGBM Boosting from %s\n",
+            file_path.c_str());
     return false;
   }
 
-  // Get number of features
-  ret = LGBM_BoosterGetNumFeature(booster_, &num_features_);
-  if (ret != 0) {
-    fprintf(stderr, "Failed to get number of features: %s\n", LGBM_GetLastError());
-    LGBM_BoosterFree(booster_);
-    booster_ = nullptr;
-    return false;
-  }
+  num_iterations_ = boosting_->NumberOfTotalModel();
+  boosting_->InitPredict(0, num_iterations_, false);
+  num_features_ = boosting_->MaxFeatureIdx() + 1;
 
   return true;
 }
 
 bool GBDTModel::SaveToFile(const std::string& file_path) const {
-  if (booster_ == nullptr) {
+  if (boosting_ == nullptr) {
     fprintf(stderr, "No model loaded, cannot save\n");
     return false;
   }
 
-  int ret = LGBM_BoosterSaveModel(
-      booster_,
-      0,  // start_iteration
-      -1,  // num_iteration: -1 means all iterations
-      C_API_FEATURE_IMPORTANCE_SPLIT,  // feature_importance_type
-      file_path.c_str());
-
-  if (ret != 0) {
-    fprintf(stderr, "Failed to save LightGBM model to %s: %s\n",
-            file_path.c_str(), LGBM_GetLastError());
+  if (!boosting_->SaveModelToFile(
+          0, -1, 0, file_path.c_str())) {
+    fprintf(stderr, "Failed to save LightGBM model to %s\n",
+            file_path.c_str());
     return false;
   }
 

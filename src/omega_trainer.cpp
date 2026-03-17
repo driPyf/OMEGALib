@@ -64,6 +64,7 @@ class ScopedTimer {
 
 void OmegaTrainer::PrepareData(
     const std::vector<TrainingRecord>& records,
+    std::vector<int>& query_ids,
     std::vector<float>& features,
     std::vector<float>& labels,
     int& num_samples,
@@ -72,6 +73,7 @@ void OmegaTrainer::PrepareData(
   num_features = 11;
   num_samples = static_cast<int>(records.size());
 
+  query_ids.resize(num_samples);
   features.resize(num_samples * num_features);
   labels.resize(num_samples);
 
@@ -79,6 +81,7 @@ void OmegaTrainer::PrepareData(
     const auto& r = records[i];
     int offset = i * num_features;
 
+    query_ids[i] = r.query_id;
     features[offset + 0] = static_cast<float>(r.hops_visited);
     features[offset + 1] = static_cast<float>(r.cmps_visited);
     features[offset + 2] = r.dist_1st;
@@ -97,6 +100,17 @@ int OmegaTrainer::GenerateThresholdTable(
     const std::vector<float>& predictions,
     const std::vector<float>& labels,
     const std::string& output_path) {
+  struct Block {
+    size_t begin;
+    size_t end;
+    double sum;
+    size_t count;
+  };
+
+  if (predictions.empty() || predictions.size() != labels.size()) {
+    return -1;
+  }
+
   // Sort predictions and corresponding labels
   std::vector<size_t> indices(predictions.size());
   std::iota(indices.begin(), indices.end(), 0);
@@ -104,21 +118,42 @@ int OmegaTrainer::GenerateThresholdTable(
     return predictions[a] < predictions[b];
   });
 
-  // Compute cumulative positive rate (isotonic-like)
   std::vector<float> sorted_conf(predictions.size());
-  std::vector<float> sorted_prob(predictions.size());
-
-  double cumsum = 0;
   for (size_t i = 0; i < indices.size(); ++i) {
-    cumsum += labels[indices[i]];
     sorted_conf[i] = predictions[indices[i]];
-    sorted_prob[i] = static_cast<float>(cumsum / (i + 1));
+  }
+  std::vector<float> isotonic_prob(predictions.size(), 0.0f);
+
+  // Pool adjacent violators on labels sorted by prediction score.
+  std::vector<Block> blocks;
+  blocks.reserve(indices.size());
+  for (size_t i = 0; i < indices.size(); ++i) {
+    blocks.push_back(Block{i, i + 1, static_cast<double>(labels[indices[i]]), 1});
+    while (blocks.size() >= 2) {
+      const auto& curr = blocks.back();
+      const auto& prev = blocks[blocks.size() - 2];
+      double curr_avg = curr.sum / static_cast<double>(curr.count);
+      double prev_avg = prev.sum / static_cast<double>(prev.count);
+      if (prev_avg <= curr_avg) {
+        break;
+      }
+
+      Block merged{
+          prev.begin,
+          curr.end,
+          prev.sum + curr.sum,
+          prev.count + curr.count,
+      };
+      blocks.pop_back();
+      blocks.pop_back();
+      blocks.push_back(merged);
+    }
   }
 
-  // Apply isotonic regression (pool adjacent violators)
-  for (size_t i = 1; i < sorted_prob.size(); ++i) {
-    if (sorted_prob[i] < sorted_prob[i-1]) {
-      sorted_prob[i] = sorted_prob[i-1];
+  for (const auto& block : blocks) {
+    float block_avg = static_cast<float>(block.sum / static_cast<double>(block.count));
+    for (size_t i = block.begin; i < block.end; ++i) {
+      isotonic_prob[i] = block_avg;
     }
   }
 
@@ -134,7 +169,7 @@ int OmegaTrainer::GenerateThresholdTable(
     int quantized = static_cast<int>(std::round(sorted_conf[i] * 10000));
     if (quantized != last_quantized) {
       ofs << std::fixed << std::setprecision(4) << sorted_conf[i] << ","
-          << std::setprecision(6) << sorted_prob[i] << "\n";
+          << std::setprecision(6) << isotonic_prob[i] << "\n";
       last_quantized = quantized;
     }
   }
@@ -153,6 +188,14 @@ int OmegaTrainer::GenerateGtCmpsAllTable(
 
   size_t num_queries = gt_cmps_data.num_queries;
   size_t topk = gt_cmps_data.topk;
+
+  // Reference format includes a leading zero row for collected_gt = 0 / rank 0.
+  ofs << 0 << ":";
+  for (int pct = 1; pct <= 100; ++pct) {
+    ofs << 0;
+    if (pct < 100) ofs << ",";
+  }
+  ofs << "\n";
 
   for (size_t rank = 0; rank < topk; ++rank) {
     // Collect all cmps values for this rank
@@ -173,7 +216,7 @@ int OmegaTrainer::GenerateGtCmpsAllTable(
     std::sort(cmps_values.begin(), cmps_values.end());
 
     // Calculate percentiles (1-100)
-    ofs << rank << ":";
+    ofs << (rank + 1) << ":";
     for (int pct = 1; pct <= 100; ++pct) {
       size_t idx = static_cast<size_t>((pct / 100.0) * (cmps_values.size() - 1));
       idx = std::min(idx, cmps_values.size() - 1);
@@ -286,6 +329,23 @@ int OmegaTrainer::TrainModel(
     const std::vector<TrainingRecord>& training_records,
     const GtCmpsData& gt_cmps_data,
     const OmegaTrainerOptions& options) {
+  auto subset_gt_cmps = [](const GtCmpsData& src,
+                           const std::vector<int>& query_ids_subset) -> GtCmpsData {
+    GtCmpsData dst;
+    dst.topk = src.topk;
+    dst.gt_cmps.reserve(query_ids_subset.size());
+    dst.total_cmps.reserve(query_ids_subset.size());
+    for (int query_id : query_ids_subset) {
+      if (query_id < 0 || query_id >= static_cast<int>(src.gt_cmps.size()) ||
+          query_id >= static_cast<int>(src.total_cmps.size())) {
+        continue;
+      }
+      dst.gt_cmps.push_back(src.gt_cmps[query_id]);
+      dst.total_cmps.push_back(src.total_cmps[query_id]);
+    }
+    dst.num_queries = dst.gt_cmps.size();
+    return dst;
+  };
 
   if (training_records.empty()) {
     std::cerr << "[OMEGA] Training records are empty" << std::endl;
@@ -300,12 +360,13 @@ int OmegaTrainer::TrainModel(
   auto total_start = std::chrono::high_resolution_clock::now();
 
   // Step 1: Prepare training data
+  std::vector<int> query_ids;
   std::vector<float> features, labels;
   int num_samples, num_features;
 
   {
     ScopedTimer timer("PrepareData", options.verbose);
-    PrepareData(training_records, features, labels, num_samples, num_features);
+    PrepareData(training_records, query_ids, features, labels, num_samples, num_features);
   }
 
   // Count positive and negative samples
@@ -329,9 +390,56 @@ int OmegaTrainer::TrainModel(
     std::cout << "[OMEGA] scale_pos_weight: " << scale_pos_weight << std::endl;
   }
 
-  // Step 2: Split into train/test (80/20)
-  int train_size = static_cast<int>(num_samples * 0.8);
+  // Step 2: Split into train/test (80/20) by query_id without shuffling.
+  std::vector<int> ordered_query_ids;
+  ordered_query_ids.reserve(query_ids.size());
+  bool query_ids_non_decreasing = true;
+  int prev_query_id = std::numeric_limits<int>::min();
+  for (int query_id : query_ids) {
+    if (query_id < prev_query_id) {
+      query_ids_non_decreasing = false;
+    }
+    if (ordered_query_ids.empty() || ordered_query_ids.back() != query_id) {
+      ordered_query_ids.push_back(query_id);
+    }
+    prev_query_id = query_id;
+  }
+
+  if (!query_ids_non_decreasing) {
+    std::cerr << "[OMEGA] Training records are not grouped by query_id; "
+                 "query-level split requires non-decreasing query ids"
+              << std::endl;
+    return -1;
+  }
+
+  size_t train_query_count = ordered_query_ids.size() * 8 / 10;
+  if (train_query_count == 0 || train_query_count >= ordered_query_ids.size()) {
+    std::cerr << "[OMEGA] Invalid query-level split with "
+              << ordered_query_ids.size() << " unique queries" << std::endl;
+    return -1;
+  }
+
+  std::vector<int> train_query_ids(
+      ordered_query_ids.begin(), ordered_query_ids.begin() + train_query_count);
+  std::vector<int> test_query_ids(
+      ordered_query_ids.begin() + train_query_count, ordered_query_ids.end());
+
+  int split_query_id = test_query_ids.front();
+  auto split_it = std::lower_bound(query_ids.begin(), query_ids.end(), split_query_id);
+  if (split_it == query_ids.end()) {
+    std::cerr << "[OMEGA] Failed to find split point for query_id="
+              << split_query_id << std::endl;
+    return -1;
+  }
+
+  int train_size = static_cast<int>(std::distance(query_ids.begin(), split_it));
   int test_size = num_samples - train_size;
+  if (train_size == 0 || test_size == 0) {
+    std::cerr << "[OMEGA] Empty train/test split after query-level partition" << std::endl;
+    return -1;
+  }
+
+  GtCmpsData gt_cmps_test = subset_gt_cmps(gt_cmps_data, test_query_ids);
 
   // Step 3: Create LightGBM datasets
   DatasetHandle train_data = nullptr;
@@ -369,7 +477,7 @@ int OmegaTrainer::TrainModel(
 
     // Create test dataset using training data as reference
     LGBM_CHECK(LGBM_DatasetCreateFromMat(
-        features.data() + train_size * num_features,
+        features.data() + static_cast<size_t>(train_size) * num_features,
         C_API_DTYPE_FLOAT32,
         test_size,
         num_features,
@@ -466,7 +574,7 @@ int OmegaTrainer::TrainModel(
 
     LGBM_CHECK(LGBM_BoosterPredictForMat(
         booster,
-        features.data() + train_size * num_features,
+        features.data() + static_cast<size_t>(train_size) * num_features,
         C_API_DTYPE_FLOAT32,
         test_size,
         num_features,
@@ -488,8 +596,8 @@ int OmegaTrainer::TrainModel(
   // Step 7: Generate threshold table
   {
     ScopedTimer timer("GenerateThresholdTable", options.verbose);
-    std::vector<float> test_labels(labels.begin() + train_size, labels.end());
     std::string threshold_path = options.output_dir + "/threshold_table.txt";
+    std::vector<float> test_labels(labels.begin() + train_size, labels.end());
     if (GenerateThresholdTable(test_predictions, test_labels, threshold_path) != 0) {
       std::cerr << "[OMEGA] Failed to generate threshold table" << std::endl;
       // Continue anyway
@@ -497,23 +605,23 @@ int OmegaTrainer::TrainModel(
   }
 
   // Step 8: Generate tables from gt_cmps data
-  if (gt_cmps_data.num_queries > 0) {
+  if (gt_cmps_test.num_queries > 0) {
     {
       ScopedTimer timer("GenerateGtCmpsAllTable", options.verbose);
       std::string path = options.output_dir + "/gt_cmps_all_table.txt";
-      GenerateGtCmpsAllTable(gt_cmps_data, path);
+      GenerateGtCmpsAllTable(gt_cmps_test, path);
     }
 
     {
       ScopedTimer timer("GenerateGtCollectedTable", options.verbose);
       std::string path = options.output_dir + "/gt_collected_table.txt";
-      GenerateGtCollectedTable(gt_cmps_data, path);
+      GenerateGtCollectedTable(gt_cmps_test, path);
     }
 
     {
       ScopedTimer timer("GenerateIntervalTable", options.verbose);
       std::string path = options.output_dir + "/interval_table.txt";
-      GenerateIntervalTable(gt_cmps_data, path);
+      GenerateIntervalTable(gt_cmps_test, path);
     }
   }
 
@@ -534,4 +642,3 @@ int OmegaTrainer::TrainModel(
 }
 
 }  // namespace omega
-

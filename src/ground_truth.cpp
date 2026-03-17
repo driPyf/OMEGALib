@@ -60,12 +60,20 @@ std::vector<std::vector<uint64_t>> ComputeGroundTruth(
     size_t dim,
     size_t k,
     MetricType metric,
-    bool exclude_self) {
+    bool exclude_self,
+    const std::vector<uint64_t>& query_base_indices) {
 
   std::vector<std::vector<uint64_t>> ground_truth(num_queries);
 
   if (num_base == 0 || num_queries == 0 || k == 0) {
     return ground_truth;
+  }
+
+  // Validate query_base_indices if provided
+  bool use_query_indices = exclude_self && !query_base_indices.empty();
+  if (use_query_indices && query_base_indices.size() != num_queries) {
+    // Invalid size, fall back to simple q==p exclusion
+    use_query_indices = false;
   }
 
   // Adjust k for exclusion
@@ -159,9 +167,12 @@ std::vector<std::vector<uint64_t>> ComputeGroundTruth(
       size_t q = batch_start + q_local;
       MaxHeap heap;
 
+      // Determine which base index to exclude for this query
+      size_t exclude_idx = use_query_indices ? query_base_indices[q] : q;
+
       for (size_t p = 0; p < num_base; ++p) {
-        // Skip self if requested
-        if (exclude_self && p == q) {
+        // Skip self if requested (using correct base index mapping)
+        if (exclude_self && p == exclude_idx) {
           continue;
         }
 

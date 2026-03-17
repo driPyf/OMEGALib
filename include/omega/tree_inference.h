@@ -15,14 +15,16 @@
 #ifndef ZVEC_THIRDPARTY_OMEGA_INCLUDE_TREE_INFERENCE_H_
 #define ZVEC_THIRDPARTY_OMEGA_INCLUDE_TREE_INFERENCE_H_
 
-#include <LightGBM/c_api.h>
+#include <LightGBM/boosting.h>
+#include <LightGBM/prediction_early_stop.h>
 #include <cstdint>
+#include <memory>
 #include <string>
 
 namespace omega {
 
-// Wrapper around LightGBM Booster for GBDT model inference.
-// Uses LightGBM C API for efficient prediction.
+// Wrapper around LightGBM Boosting for GBDT model inference.
+// Matches the reference implementation's C++ prediction path.
 class GBDTModel {
  public:
   GBDTModel();
@@ -70,10 +72,11 @@ class GBDTModel {
   int32_t GetTreeCount() const;
 
   // Check if model is loaded
-  bool IsLoaded() const { return booster_ != nullptr; }
+  bool IsLoaded() const { return boosting_ != nullptr; }
 
  private:
-  BoosterHandle booster_;
+  LightGBM::Boosting* boosting_;
+  LightGBM::PredictionEarlyStopInstance tree_early_stop_;
   int num_features_;
   int num_iterations_;
 };

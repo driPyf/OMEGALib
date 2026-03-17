@@ -46,8 +46,11 @@ enum class MetricType {
  * @param dim              Vector dimension
  * @param k                Number of nearest neighbors to find
  * @param metric           Distance metric to use
- * @param exclude_self     If query i should exclude base vector i from results
+ * @param exclude_self     If true, exclude each query's corresponding base vector from results
  *                         (useful for held-out evaluation where queries are sampled from base)
+ * @param query_base_indices If exclude_self is true and this is non-empty, query q will
+ *                         exclude base vector query_base_indices[q] (size must be num_queries).
+ *                         If empty and exclude_self is true, query q excludes base vector q.
  * @return                 Ground truth indices, [num_queries x k], each row contains
  *                         k nearest neighbor indices sorted by distance
  */
@@ -59,7 +62,8 @@ std::vector<std::vector<uint64_t>> ComputeGroundTruth(
     size_t dim,
     size_t k,
     MetricType metric = MetricType::IP,
-    bool exclude_self = false);
+    bool exclude_self = false,
+    const std::vector<uint64_t>& query_base_indices = {});
 
 }  // namespace omega
 
