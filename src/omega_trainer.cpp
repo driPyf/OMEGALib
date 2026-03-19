@@ -23,6 +23,7 @@
 #include <numeric>
 #include <sstream>
 #include <iostream>
+#include "omega/tree_inference.h"
 
 namespace omega {
 

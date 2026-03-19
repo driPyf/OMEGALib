@@ -283,6 +283,31 @@ bool SearchContext::ShouldStopEarly() {
   auto should_stop_start = std::chrono::steady_clock::now();
   uint64_t predictions_before = prediction_calls_;
   bool collected_gt_advanced_in_call = false;
+  float predicted_recall_at_target = 0.0f;
+
+  auto evaluate_average_recall = [this]() -> float {
+    auto avg_eval_start = std::chrono::steady_clock::now();
+    double predicted_recall_avg = 0.0;
+    for (int i = 1; i <= k_; i++) {
+      if (i <= collected_gt_) {
+        predicted_recall_avg += 1.0;
+      } else {
+        double recall_from_gt_collected =
+            GetRecallFromGtCollectedTable(collected_gt_, i);
+        double recall_from_gt_cmps =
+            GetRecallFromGtCmpsAllTable(i, comparisons_);
+        predicted_recall_avg +=
+            std::max(recall_from_gt_collected, recall_from_gt_cmps);
+      }
+    }
+    predicted_recall_avg /= k_;
+    average_recall_eval_time_ns_ +=
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - avg_eval_start)
+            .count();
+    last_predicted_recall_avg_ = static_cast<float>(predicted_recall_avg);
+    return last_predicted_recall_avg_;
+  };
 
   if (!model_ || !tables_) {
     should_stop_time_ns_ +=
@@ -304,62 +329,91 @@ bool SearchContext::ShouldStopEarly() {
             std::chrono::steady_clock::now() - sorted_window_start)
             .count();
 
-    // Step 1: Update collected_gt using per-K prediction
-    bool collected_gt_has_changed = false;
-    float predicted_recall_at_target = 0.0f;
-    last_predicted_recall_avg_ = 0.0f;
-
-    while (true) {
-      int idx = std::min(collected_gt_ + k_train_ - 1, k_ - 1);
+    auto can_confirm_count = [&](int confirmed_count) -> bool {
+      int idx = std::min(confirmed_count - 1, k_ - 1);
       ++prediction_calls_;
       predicted_recall_at_target =
           PredictRecallForRankWithSortedWindow(idx, sorted_window);
       last_predicted_recall_at_target_ = predicted_recall_at_target;
+      return predicted_recall_at_target >= recall_targets_[idx];
+    };
 
-      if (predicted_recall_at_target >= recall_targets_[idx]) {
-        collected_gt_has_changed = true;
-        collected_gt_advanced_in_call = true;
-        collected_gt_ += k_train_;
-        collected_gt_advance_count_ += k_train_;
-        if (collected_gt_ >= k_) {
-          early_stop_hit_ = true;
-          last_predicted_recall_avg_ = 1.0f;
-          if (collected_gt_advanced_in_call) {
-            ++should_stop_calls_with_advance_;
-          }
-          max_prediction_calls_per_should_stop_ =
-              std::max(max_prediction_calls_per_should_stop_,
-                       prediction_calls_ - predictions_before);
-          should_stop_time_ns_ +=
-              std::chrono::duration_cast<std::chrono::nanoseconds>(
-                  std::chrono::steady_clock::now() - should_stop_start)
-                  .count();
-          return true;  // All K results confirmed!
+    // Step 1: Find the maximum confirmable rank for this search state.
+    // Use exponential expansion plus binary search rather than scanning
+    // rank-by-rank from 1. This keeps easy queries from paying O(k) model
+    // evaluations inside a single should_stop() call.
+    bool collected_gt_has_changed = false;
+    last_predicted_recall_avg_ = 0.0f;
+    const int block_size = std::max(1, k_train_);
+    int best_confirmed = collected_gt_;
+    int first_probe = std::min(k_, collected_gt_ + block_size);
+    int first_failed = -1;
+
+    if (first_probe > collected_gt_ && can_confirm_count(first_probe)) {
+      best_confirmed = first_probe;
+
+      int step = block_size;
+      while (best_confirmed < k_) {
+        int next_probe = std::min(k_, best_confirmed + step);
+        if (next_probe <= best_confirmed) {
+          break;
         }
-      } else {
-        break;
+
+        if (can_confirm_count(next_probe)) {
+          best_confirmed = next_probe;
+          step *= 2;
+        } else {
+          first_failed = next_probe;
+          break;
+        }
+      }
+
+      if (best_confirmed < k_ && first_failed > best_confirmed) {
+        int low = best_confirmed;
+        int high = first_failed;
+        while (high - low > block_size) {
+          int mid = low + (((high - low) / (2 * block_size)) * block_size);
+          if (mid <= low || mid >= high) {
+            break;
+          }
+
+          if (can_confirm_count(mid)) {
+            low = mid;
+          } else {
+            high = mid;
+          }
+        }
+        best_confirmed = low;
+      }
+    } else {
+      first_failed = first_probe;
+    }
+
+    if (best_confirmed > collected_gt_) {
+      collected_gt_has_changed = true;
+      collected_gt_advanced_in_call = true;
+      collected_gt_advance_count_ += (best_confirmed - collected_gt_);
+      collected_gt_ = best_confirmed;
+      if (collected_gt_ >= k_) {
+        early_stop_hit_ = true;
+        last_predicted_recall_avg_ = 1.0f;
+        if (collected_gt_advanced_in_call) {
+          ++should_stop_calls_with_advance_;
+        }
+        max_prediction_calls_per_should_stop_ =
+            std::max(max_prediction_calls_per_should_stop_,
+                     prediction_calls_ - predictions_before);
+        should_stop_time_ns_ +=
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - should_stop_start)
+                .count();
+        return true;  // All K results confirmed!
       }
     }
 
     // Step 2: Compute average recall if collected_gt changed
     if (collected_gt_has_changed) {
-      auto avg_eval_start = std::chrono::steady_clock::now();
-      double predicted_recall_avg = 0.0;
-      for (int i = 1; i <= k_; i++) {
-        if (i <= collected_gt_) {
-          predicted_recall_avg += 1.0;
-        } else {
-          double recall_from_gt_collected = GetRecallFromGtCollectedTable(collected_gt_, i);
-          double recall_from_gt_cmps = GetRecallFromGtCmpsAllTable(i, comparisons_);
-          predicted_recall_avg += std::max(recall_from_gt_collected, recall_from_gt_cmps);
-        }
-      }
-      predicted_recall_avg /= k_;
-      last_predicted_recall_avg_ = static_cast<float>(predicted_recall_avg);
-      average_recall_eval_time_ns_ +=
-          std::chrono::duration_cast<std::chrono::nanoseconds>(
-              std::chrono::steady_clock::now() - avg_eval_start)
-              .count();
+      float predicted_recall_avg = evaluate_average_recall();
 
       if (predicted_recall_avg >= target_recall_) {
         early_stop_hit_ = true;
