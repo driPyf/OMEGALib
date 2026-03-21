@@ -23,11 +23,54 @@
 #include <numeric>
 #include <sstream>
 #include <iostream>
+#include <mutex>
+#include <unordered_map>
 #include "omega/tree_inference.h"
 
 namespace omega {
 
 namespace {
+
+struct TimingStatsState {
+  std::mutex mu;
+  std::vector<std::pair<std::string, int64_t>> ordered_stats;
+  std::unordered_map<std::string, size_t> index_by_name;
+};
+
+TimingStatsState& GetTimingStatsState() {
+  static TimingStatsState state;
+  return state;
+}
+
+void RecordTimingStat(const std::string& name, int64_t duration_ms) {
+  auto& state = GetTimingStatsState();
+  std::lock_guard<std::mutex> lock(state.mu);
+  auto it = state.index_by_name.find(name);
+  if (it == state.index_by_name.end()) {
+    state.index_by_name[name] = state.ordered_stats.size();
+    state.ordered_stats.emplace_back(name, duration_ms);
+  } else {
+    state.ordered_stats[it->second].second = duration_ms;
+  }
+}
+
+void WriteTimingStatsJson(
+    const std::string& output_path,
+    const std::vector<std::pair<std::string, int64_t>>& stats) {
+  std::ofstream ofs(output_path);
+  if (!ofs.is_open()) {
+    return;
+  }
+  ofs << "{\n";
+  for (size_t i = 0; i < stats.size(); ++i) {
+    ofs << "  \"" << stats[i].first << "\": " << stats[i].second;
+    if (i + 1 < stats.size()) {
+      ofs << ",";
+    }
+    ofs << "\n";
+  }
+  ofs << "}\n";
+}
 
 // Helper to log with timing
 class ScopedTimer {
@@ -42,6 +85,7 @@ class ScopedTimer {
   ~ScopedTimer() {
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start_).count();
+    RecordTimingStat(name_, duration);
     if (verbose_) {
       std::cout << "[OMEGA] [END]   " << name_ << " | Duration: " << duration << " ms" << std::endl;
     }
@@ -62,6 +106,22 @@ class ScopedTimer {
 } while (0)
 
 }  // namespace
+
+void OmegaTrainer::ResetTimingStats() {
+  auto& state = GetTimingStatsState();
+  std::lock_guard<std::mutex> lock(state.mu);
+  state.ordered_stats.clear();
+  state.index_by_name.clear();
+}
+
+OmegaTrainer::TimingStats OmegaTrainer::ConsumeTimingStats() {
+  auto& state = GetTimingStatsState();
+  std::lock_guard<std::mutex> lock(state.mu);
+  TimingStats timings = std::move(state.ordered_stats);
+  state.ordered_stats.clear();
+  state.index_by_name.clear();
+  return timings;
+}
 
 void OmegaTrainer::PrepareData(
     const std::vector<TrainingRecord>& records,
@@ -330,6 +390,7 @@ int OmegaTrainer::TrainModel(
     const std::vector<TrainingRecord>& training_records,
     const GtCmpsData& gt_cmps_data,
     const OmegaTrainerOptions& options) {
+  ResetTimingStats();
   auto subset_gt_cmps = [](const GtCmpsData& src,
                            const std::vector<int>& query_ids_subset) -> GtCmpsData {
     GtCmpsData dst;
@@ -633,6 +694,9 @@ int OmegaTrainer::TrainModel(
 
   auto total_end = std::chrono::high_resolution_clock::now();
   auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(total_end - total_start).count();
+  RecordTimingStat("TrainModel [TOTAL]", total_ms);
+  WriteTimingStatsJson(options.output_dir + "/lightgbm_training_timing.json",
+                       ConsumeTimingStats());
 
   if (options.verbose) {
     std::cout << "[OMEGA] Training completed successfully in " << total_ms << " ms" << std::endl;

@@ -17,6 +17,7 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <utility>
 
 namespace omega {
 
@@ -65,6 +66,8 @@ struct OmegaTrainerOptions {
  */
 class OmegaTrainer {
  public:
+  using TimingStats = std::vector<std::pair<std::string, int64_t>>;
+
   /**
    * @brief Train OMEGA model from collected training records
    *
@@ -77,6 +80,10 @@ class OmegaTrainer {
       const std::vector<TrainingRecord>& training_records,
       const GtCmpsData& gt_cmps_data,
       const OmegaTrainerOptions& options);
+
+  static void ResetTimingStats();
+
+  static TimingStats ConsumeTimingStats();
 
  private:
   /**
