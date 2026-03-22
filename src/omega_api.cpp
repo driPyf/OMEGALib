@@ -389,3 +389,10 @@ int omega_search_get_total_cmps(OmegaSearchHandle handle) {
     return 0;
   }
 }
+
+omega::SearchContext* omega_search_get_cpp_context(OmegaSearchHandle handle) {
+  if (!handle) {
+    return nullptr;
+  }
+  return handle->context;
+}

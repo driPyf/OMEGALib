@@ -13,9 +13,9 @@
 // limitations under the License.
 
 #include "omega/search_context.h"
+#include "omega/profiling_timer.h"
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <cmath>
 #include <limits>
 
@@ -30,6 +30,8 @@ SearchContext::SearchContext(const GBDTModel* model, const ModelTables* tables,
       window_size_(window_size),
       k_train_(1),  // Phase 4: K value for training
       use_weighted_bh_(true),  // Phase 4: Enable Weighted BH by default
+      traversal_window_head_(0),
+      traversal_window_size_(0),
       hops_(0),
       comparisons_(0),
       dist_start_(std::numeric_limits<float>::max()),
@@ -51,6 +53,12 @@ SearchContext::SearchContext(const GBDTModel* model, const ModelTables* tables,
       collected_gt_advance_count_(0),
       should_stop_calls_with_advance_(0),
       max_prediction_calls_per_should_stop_(0) {  // Phase 5: No query ID initially
+  traversal_window_buffer_.resize(window_size_ > 0 ? window_size_ : 0);
+  top_candidates_.reserve(k_ > 0 ? k_ : 0);
+  sorted_window_scratch_.reserve(window_size_ > 0 ? window_size_ : 0);
+  filtered_distances_scratch_.reserve(window_size_ > 0 ? window_size_ : 0);
+  masked_ids_scratch_.reserve(k_ > 0 ? k_ : 0);
+
   // Get initial prediction interval from interval_table
   auto interval = GetPredictionInterval(target_recall);
   next_prediction_cmps_ = interval.first;  // initial_interval
@@ -62,7 +70,8 @@ SearchContext::SearchContext(const GBDTModel* model, const ModelTables* tables,
 SearchContext::~SearchContext() = default;
 
 void SearchContext::Reset() {
-  traversal_window_.clear();
+  traversal_window_head_ = 0;
+  traversal_window_size_ = 0;
   top_candidates_.clear();
   hops_ = 0;
   comparisons_ = 0;
@@ -122,14 +131,40 @@ bool SearchContext::UpdateTopCandidates(int node_id, float distance, int cmps) {
   return true;
 }
 
+void SearchContext::PushTraversalWindow(int node_id, float distance) {
+  if (window_size_ <= 0 || traversal_window_buffer_.empty()) {
+    return;
+  }
+
+  if (traversal_window_size_ < window_size_) {
+    int insert_idx = (traversal_window_head_ + traversal_window_size_) % window_size_;
+    traversal_window_buffer_[insert_idx] = {node_id, distance};
+    ++traversal_window_size_;
+    return;
+  }
+
+  traversal_window_buffer_[traversal_window_head_] = {node_id, distance};
+  traversal_window_head_ = (traversal_window_head_ + 1) % window_size_;
+}
+
+void SearchContext::CopyTraversalWindowTo(
+    std::vector<std::pair<int, float>>* out) const {
+  out->clear();
+  if (traversal_window_size_ <= 0 || traversal_window_buffer_.empty()) {
+    return;
+  }
+
+  out->reserve(traversal_window_size_);
+  for (int i = 0; i < traversal_window_size_; ++i) {
+    int idx = (traversal_window_head_ + i) % window_size_;
+    out->push_back(traversal_window_buffer_[idx]);
+  }
+}
+
 void SearchContext::ReportVisit(int node_id, float distance, bool is_in_topk) {
   comparisons_++;
 
-  // Update traversal window
-  traversal_window_.push_back({node_id, distance});
-  if (traversal_window_.size() > static_cast<size_t>(window_size_)) {
-    traversal_window_.pop_front();
-  }
+  PushTraversalWindow(node_id, distance);
 
   // Update topk tracking
   if (is_in_topk) {
@@ -196,11 +231,7 @@ void SearchContext::ReportVisit(int node_id, float distance, bool is_in_topk) {
 bool SearchContext::ReportVisitCandidate(int node_id, float distance,
                                          bool should_consider) {
   comparisons_++;
-
-  traversal_window_.push_back({node_id, distance});
-  if (traversal_window_.size() > static_cast<size_t>(window_size_)) {
-    traversal_window_.pop_front();
-  }
+  PushTraversalWindow(node_id, distance);
 
   bool inserted_into_topk = false;
   if (should_consider) {
@@ -248,7 +279,6 @@ bool SearchContext::ReportVisitCandidate(int node_id, float distance,
 
     training_records_.push_back(record);
   }
-
   return inserted_into_topk;
 }
 
@@ -280,13 +310,12 @@ void SearchContext::GetStats(int* hops, int* comparisons, int* collected_gt) con
 
 bool SearchContext::ShouldStopEarly() {
   ++should_stop_calls_;
-  auto should_stop_start = std::chrono::steady_clock::now();
+  auto should_stop_start = ProfilingTimer::Now();
   uint64_t predictions_before = prediction_calls_;
   bool collected_gt_advanced_in_call = false;
   float predicted_recall_at_target = 0.0f;
 
   auto evaluate_average_recall = [this]() -> float {
-    auto avg_eval_start = std::chrono::steady_clock::now();
     double predicted_recall_avg = 0.0;
     for (int i = 1; i <= k_; i++) {
       if (i <= collected_gt_) {
@@ -301,39 +330,27 @@ bool SearchContext::ShouldStopEarly() {
       }
     }
     predicted_recall_avg /= k_;
-    average_recall_eval_time_ns_ +=
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - avg_eval_start)
-            .count();
     last_predicted_recall_avg_ = static_cast<float>(predicted_recall_avg);
     return last_predicted_recall_avg_;
   };
 
   if (!model_ || !tables_) {
     should_stop_time_ns_ +=
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - should_stop_start)
-            .count();
+        ProfilingTimer::ElapsedNs(should_stop_start, ProfilingTimer::Now());
     return false;  // No model, can't make decision
   }
 
   // Phase 4: collected_gt iteration with per-K prediction
   if (use_weighted_bh_ && static_cast<int>(top_candidates_.size()) >= k_) {
-    auto sorted_window_start = std::chrono::steady_clock::now();
-    std::vector<std::pair<int, float>> sorted_window(
-        traversal_window_.begin(), traversal_window_.end());
-    std::sort(sorted_window.begin(), sorted_window.end(),
+    CopyTraversalWindowTo(&sorted_window_scratch_);
+    std::sort(sorted_window_scratch_.begin(), sorted_window_scratch_.end(),
               [](const auto& a, const auto& b) { return a.second < b.second; });
-    sorted_window_time_ns_ +=
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - sorted_window_start)
-            .count();
 
     auto can_confirm_count = [&](int confirmed_count) -> bool {
       int idx = std::min(confirmed_count - 1, k_ - 1);
       ++prediction_calls_;
       predicted_recall_at_target =
-          PredictRecallForRankWithSortedWindow(idx, sorted_window);
+          PredictRecallForRankWithSortedWindow(idx, sorted_window_scratch_);
       last_predicted_recall_at_target_ = predicted_recall_at_target;
       return predicted_recall_at_target >= recall_targets_[idx];
     };
@@ -404,9 +421,7 @@ bool SearchContext::ShouldStopEarly() {
             std::max(max_prediction_calls_per_should_stop_,
                      prediction_calls_ - predictions_before);
         should_stop_time_ns_ +=
-            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now() - should_stop_start)
-                .count();
+            ProfilingTimer::ElapsedNs(should_stop_start, ProfilingTimer::Now());
         return true;  // All K results confirmed!
       }
     }
@@ -422,9 +437,7 @@ bool SearchContext::ShouldStopEarly() {
             std::max(max_prediction_calls_per_should_stop_,
                      prediction_calls_ - predictions_before);
         should_stop_time_ns_ +=
-            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now() - should_stop_start)
-                .count();
+            ProfilingTimer::ElapsedNs(should_stop_start, ProfilingTimer::Now());
         return true;  // Early stop!
       }
 
@@ -441,9 +454,7 @@ bool SearchContext::ShouldStopEarly() {
           std::max(max_prediction_calls_per_should_stop_,
                    prediction_calls_ - predictions_before);
       should_stop_time_ns_ +=
-          std::chrono::duration_cast<std::chrono::nanoseconds>(
-              std::chrono::steady_clock::now() - should_stop_start)
-              .count();
+          ProfilingTimer::ElapsedNs(should_stop_start, ProfilingTimer::Now());
       return false;
     }
 
@@ -461,9 +472,7 @@ bool SearchContext::ShouldStopEarly() {
         std::max(max_prediction_calls_per_should_stop_,
                  prediction_calls_ - predictions_before);
     should_stop_time_ns_ +=
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - should_stop_start)
-            .count();
+        ProfilingTimer::ElapsedNs(should_stop_start, ProfilingTimer::Now());
     return false;
   }
 
@@ -472,9 +481,7 @@ bool SearchContext::ShouldStopEarly() {
   std::vector<float> features = ExtractFeatures();
   if (features.empty()) {
     should_stop_time_ns_ +=
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - should_stop_start)
-            .count();
+        ProfilingTimer::ElapsedNs(should_stop_start, ProfilingTimer::Now());
     return false;  // Not enough data yet
   }
 
@@ -501,21 +508,17 @@ bool SearchContext::ShouldStopEarly() {
   if (predicted_recall >= target_recall_) {
     early_stop_hit_ = true;
     should_stop_time_ns_ +=
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - should_stop_start)
-            .count();
+        ProfilingTimer::ElapsedNs(should_stop_start, ProfilingTimer::Now());
     return true;
   }
   should_stop_time_ns_ +=
-      std::chrono::duration_cast<std::chrono::nanoseconds>(
-          std::chrono::steady_clock::now() - should_stop_start)
-          .count();
+      ProfilingTimer::ElapsedNs(should_stop_start, ProfilingTimer::Now());
   return false;
 }
 
 std::vector<float> SearchContext::ExtractFeatures() {
   // Need at least some data in traversal window
-  if (traversal_window_.empty()) {
+  if (traversal_window_size_ <= 0) {
     return std::vector<float>();
   }
 
@@ -549,11 +552,11 @@ std::vector<float> SearchContext::ExtractFeatures() {
 std::vector<float> SearchContext::GetTraversalWindowStats(
     const std::vector<int>& masked_ids) {
   // Sort traversal_window by distance
-  std::vector<std::pair<int, float>> sorted_window(
-      traversal_window_.begin(), traversal_window_.end());
-  std::sort(sorted_window.begin(), sorted_window.end(),
+  CopyTraversalWindowTo(&sorted_window_scratch_);
+  std::sort(sorted_window_scratch_.begin(), sorted_window_scratch_.end(),
             [](const auto& a, const auto& b) { return a.second < b.second; });
-  return GetTraversalWindowStatsFromSortedWindow(sorted_window, masked_ids);
+  return GetTraversalWindowStatsFromSortedWindow(sorted_window_scratch_,
+                                                 masked_ids);
 }
 
 std::array<float, 7> SearchContext::GetTraversalWindowStatsArrayFromSortedWindow(
@@ -629,17 +632,12 @@ float SearchContext::PredictWithFeatureArray(
     return 0.0f;
   }
 
-  auto prediction_start = std::chrono::steady_clock::now();
-  auto feature_prep_start = prediction_start;
+  auto prediction_start = ProfilingTimer::Now();
 
   std::array<double, 11> features_double{};
   for (size_t i = 0; i < features.size(); ++i) {
     features_double[i] = static_cast<double>(features[i]);
   }
-  prediction_feature_prep_time_ns_ +=
-      std::chrono::duration_cast<std::chrono::nanoseconds>(
-          std::chrono::steady_clock::now() - feature_prep_start)
-          .count();
 
   // Match the reference LightGBM flow: get raw score first, then apply sigmoid
   // exactly once before threshold-table calibration.
@@ -653,9 +651,7 @@ float SearchContext::PredictWithFeatureArray(
   // Map probability to recall using threshold_table
   if (!tables_ || tables_->threshold_table.empty()) {
     prediction_eval_time_ns_ +=
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - prediction_start)
-            .count();
+        ProfilingTimer::ElapsedNs(prediction_start, ProfilingTimer::Now());
     return static_cast<float>(probability);
   }
 
@@ -669,9 +665,7 @@ float SearchContext::PredictWithFeatureArray(
   }
 
   prediction_eval_time_ns_ +=
-      std::chrono::duration_cast<std::chrono::nanoseconds>(
-          std::chrono::steady_clock::now() - prediction_start)
-          .count();
+      ProfilingTimer::ElapsedNs(prediction_start, ProfilingTimer::Now());
   return it->second;
 }
 
@@ -759,7 +753,7 @@ float SearchContext::PredictRecallForRank(int idx) {
     return 0.0f;
   }
 
-  sorted_window_scratch_.assign(traversal_window_.begin(), traversal_window_.end());
+  CopyTraversalWindowTo(&sorted_window_scratch_);
   std::sort(sorted_window_scratch_.begin(), sorted_window_scratch_.end(),
             [](const auto& a, const auto& b) { return a.second < b.second; });
 
@@ -861,6 +855,8 @@ void SearchContext::EnableTrainingMode(int query_id, const std::vector<int>& gro
   k_train_ = k_train;
   traversal_window_stats_cache_.clear();  // Clear cache for new query
   top_candidates_.clear();
+  traversal_window_head_ = 0;
+  traversal_window_size_ = 0;
   dist_1st_ = std::numeric_limits<float>::max();
 
   // Initialize gt_cmps_per_rank with -1 (will be set to total_cmps at end if not found)

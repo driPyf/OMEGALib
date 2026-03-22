@@ -18,7 +18,6 @@
 #include "omega/tree_inference.h"
 #include "omega/model_manager.h"
 #include "omega/feature_extractor.h"
-#include <deque>
 #include <limits>
 #include <array>
 #include <vector>
@@ -135,8 +134,10 @@ class SearchContext {
   bool use_weighted_bh_;  // Use Weighted BH method
 
   // Search state
-  std::deque<std::pair<int, float>> traversal_window_;  // (node_id, distance)
+  std::vector<std::pair<int, float>> traversal_window_buffer_;  // Ring buffer storage.
   std::vector<TopCandidate> top_candidates_;  // Current top-K candidates, sorted by distance
+  int traversal_window_head_;
+  int traversal_window_size_;
   int hops_;
   int comparisons_;
   float dist_start_;
@@ -178,6 +179,8 @@ class SearchContext {
 
   // Maintain the current top-k candidates like the reference implementation.
   bool UpdateTopCandidates(int node_id, float distance, int cmps);
+  void PushTraversalWindow(int node_id, float distance);
+  void CopyTraversalWindowTo(std::vector<std::pair<int, float>>* out) const;
 
   // Extract 11-dimensional features from current state
   std::vector<float> ExtractFeatures();

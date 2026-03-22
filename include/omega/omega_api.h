@@ -18,6 +18,9 @@
 #include <cstddef>  // For size_t
 
 #ifdef __cplusplus
+namespace omega {
+class SearchContext;
+}
 extern "C" {
 #endif
 
@@ -198,6 +201,10 @@ int omega_search_get_total_cmps(OmegaSearchHandle handle);
 
 #ifdef __cplusplus
 }
+
+// C++ fast path for hot call sites inside zvec. This bypasses the C wrapper
+// overhead while keeping the public C API unchanged for other users.
+omega::SearchContext* omega_search_get_cpp_context(OmegaSearchHandle handle);
 #endif
 
 #endif  // ZVEC_THIRDPARTY_OMEGA_INCLUDE_OMEGA_API_H_
