@@ -73,10 +73,6 @@ target_include_directories(omega PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 
-if(ZVEC_OMEGA_PROFILE_CONTROL_TIMING)
-  target_compile_definitions(omega PUBLIC ZVEC_OMEGA_PROFILE_CONTROL_TIMING)
-endif()
-
 # Link LightGBM and OpenMP
 target_link_libraries(omega PUBLIC _lightgbm OpenMP::OpenMP_CXX)
 

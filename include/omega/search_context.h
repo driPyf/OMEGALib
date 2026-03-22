@@ -173,6 +173,7 @@ class SearchContext {
   uint64_t collected_gt_advance_count_;
   uint64_t should_stop_calls_with_advance_;
   uint64_t max_prediction_calls_per_should_stop_;
+  bool collect_timing_;
 
   // Initialize Weighted BH method (Phase 4)
   void InitializeWeightedBH();

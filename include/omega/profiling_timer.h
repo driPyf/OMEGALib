@@ -15,6 +15,7 @@
 #ifndef ZVEC_THIRDPARTY_OMEGA_INCLUDE_PROFILING_TIMER_H_
 #define ZVEC_THIRDPARTY_OMEGA_INCLUDE_PROFILING_TIMER_H_
 
+#include <cstdlib>
 #include <cstdint>
 #include <ctime>
 
@@ -25,6 +26,17 @@
 #endif
 
 namespace omega {
+
+inline bool IsControlTimingEnabled() {
+  static const bool enabled = []() {
+    const char* value = std::getenv("ZVEC_OMEGA_PROFILE_CONTROL_TIMING");
+    if (value == nullptr) {
+      return false;
+    }
+    return value[0] != '\0' && value[0] != '0';
+  }();
+  return enabled;
+}
 
 class ProfilingTimer {
  public:

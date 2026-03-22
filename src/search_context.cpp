@@ -52,7 +52,8 @@ SearchContext::SearchContext(const GBDTModel* model, const ModelTables* tables,
       prediction_feature_prep_time_ns_(0),
       collected_gt_advance_count_(0),
       should_stop_calls_with_advance_(0),
-      max_prediction_calls_per_should_stop_(0) {  // Phase 5: No query ID initially
+      max_prediction_calls_per_should_stop_(0),
+      collect_timing_(IsControlTimingEnabled()) {  // Phase 5: No query ID initially
   traversal_window_buffer_.resize(window_size_ > 0 ? window_size_ : 0);
   top_candidates_.reserve(k_ > 0 ? k_ : 0);
   sorted_window_scratch_.reserve(window_size_ > 0 ? window_size_ : 0);
@@ -310,7 +311,10 @@ void SearchContext::GetStats(int* hops, int* comparisons, int* collected_gt) con
 
 bool SearchContext::ShouldStopEarly() {
   ++should_stop_calls_;
-  auto should_stop_start = ProfilingTimer::Now();
+  ProfilingTimer::tick_t should_stop_start = 0;
+  if (collect_timing_) {
+    should_stop_start = ProfilingTimer::Now();
+  }
   uint64_t predictions_before = prediction_calls_;
   bool collected_gt_advanced_in_call = false;
   float predicted_recall_at_target = 0.0f;
@@ -335,8 +339,10 @@ bool SearchContext::ShouldStopEarly() {
   };
 
   if (!model_ || !tables_) {
-    should_stop_time_ns_ +=
-        ProfilingTimer::ElapsedNs(should_stop_start, ProfilingTimer::Now());
+    if (collect_timing_) {
+      should_stop_time_ns_ +=
+          ProfilingTimer::ElapsedNs(should_stop_start, ProfilingTimer::Now());
+    }
     return false;  // No model, can't make decision
   }
 
@@ -420,8 +426,10 @@ bool SearchContext::ShouldStopEarly() {
         max_prediction_calls_per_should_stop_ =
             std::max(max_prediction_calls_per_should_stop_,
                      prediction_calls_ - predictions_before);
-        should_stop_time_ns_ +=
-            ProfilingTimer::ElapsedNs(should_stop_start, ProfilingTimer::Now());
+        if (collect_timing_) {
+          should_stop_time_ns_ +=
+              ProfilingTimer::ElapsedNs(should_stop_start, ProfilingTimer::Now());
+        }
         return true;  // All K results confirmed!
       }
     }
@@ -436,8 +444,10 @@ bool SearchContext::ShouldStopEarly() {
         max_prediction_calls_per_should_stop_ =
             std::max(max_prediction_calls_per_should_stop_,
                      prediction_calls_ - predictions_before);
-        should_stop_time_ns_ +=
-            ProfilingTimer::ElapsedNs(should_stop_start, ProfilingTimer::Now());
+        if (collect_timing_) {
+          should_stop_time_ns_ +=
+              ProfilingTimer::ElapsedNs(should_stop_start, ProfilingTimer::Now());
+        }
         return true;  // Early stop!
       }
 
@@ -453,8 +463,10 @@ bool SearchContext::ShouldStopEarly() {
       max_prediction_calls_per_should_stop_ =
           std::max(max_prediction_calls_per_should_stop_,
                    prediction_calls_ - predictions_before);
-      should_stop_time_ns_ +=
-          ProfilingTimer::ElapsedNs(should_stop_start, ProfilingTimer::Now());
+      if (collect_timing_) {
+        should_stop_time_ns_ +=
+            ProfilingTimer::ElapsedNs(should_stop_start, ProfilingTimer::Now());
+      }
       return false;
     }
 
@@ -471,8 +483,10 @@ bool SearchContext::ShouldStopEarly() {
     max_prediction_calls_per_should_stop_ =
         std::max(max_prediction_calls_per_should_stop_,
                  prediction_calls_ - predictions_before);
-    should_stop_time_ns_ +=
-        ProfilingTimer::ElapsedNs(should_stop_start, ProfilingTimer::Now());
+    if (collect_timing_) {
+      should_stop_time_ns_ +=
+          ProfilingTimer::ElapsedNs(should_stop_start, ProfilingTimer::Now());
+    }
     return false;
   }
 
@@ -480,8 +494,10 @@ bool SearchContext::ShouldStopEarly() {
   // Extract features and predict
   std::vector<float> features = ExtractFeatures();
   if (features.empty()) {
-    should_stop_time_ns_ +=
-        ProfilingTimer::ElapsedNs(should_stop_start, ProfilingTimer::Now());
+    if (collect_timing_) {
+      should_stop_time_ns_ +=
+          ProfilingTimer::ElapsedNs(should_stop_start, ProfilingTimer::Now());
+    }
     return false;  // Not enough data yet
   }
 
@@ -507,12 +523,16 @@ bool SearchContext::ShouldStopEarly() {
   // Stop if we've reached target recall
   if (predicted_recall >= target_recall_) {
     early_stop_hit_ = true;
-    should_stop_time_ns_ +=
-        ProfilingTimer::ElapsedNs(should_stop_start, ProfilingTimer::Now());
+    if (collect_timing_) {
+      should_stop_time_ns_ +=
+          ProfilingTimer::ElapsedNs(should_stop_start, ProfilingTimer::Now());
+    }
     return true;
   }
-  should_stop_time_ns_ +=
-      ProfilingTimer::ElapsedNs(should_stop_start, ProfilingTimer::Now());
+  if (collect_timing_) {
+    should_stop_time_ns_ +=
+        ProfilingTimer::ElapsedNs(should_stop_start, ProfilingTimer::Now());
+  }
   return false;
 }
 
@@ -632,7 +652,10 @@ float SearchContext::PredictWithFeatureArray(
     return 0.0f;
   }
 
-  auto prediction_start = ProfilingTimer::Now();
+  ProfilingTimer::tick_t prediction_start = 0;
+  if (collect_timing_) {
+    prediction_start = ProfilingTimer::Now();
+  }
 
   std::array<double, 11> features_double{};
   for (size_t i = 0; i < features.size(); ++i) {
@@ -650,8 +673,10 @@ float SearchContext::PredictWithFeatureArray(
 
   // Map probability to recall using threshold_table
   if (!tables_ || tables_->threshold_table.empty()) {
-    prediction_eval_time_ns_ +=
-        ProfilingTimer::ElapsedNs(prediction_start, ProfilingTimer::Now());
+    if (collect_timing_) {
+      prediction_eval_time_ns_ +=
+          ProfilingTimer::ElapsedNs(prediction_start, ProfilingTimer::Now());
+    }
     return static_cast<float>(probability);
   }
 
@@ -664,8 +689,10 @@ float SearchContext::PredictWithFeatureArray(
     --it;
   }
 
-  prediction_eval_time_ns_ +=
-      ProfilingTimer::ElapsedNs(prediction_start, ProfilingTimer::Now());
+  if (collect_timing_) {
+    prediction_eval_time_ns_ +=
+        ProfilingTimer::ElapsedNs(prediction_start, ProfilingTimer::Now());
+  }
   return it->second;
 }
 
