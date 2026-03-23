@@ -514,7 +514,13 @@ int OmegaTrainer::TrainModel(
     // Build parameters string
     std::ostringstream params_ss;
     params_ss << "num_threads=" << options.num_threads << " ";
+    params_ss << "seed=" << options.seed << " ";
+    params_ss << "data_random_seed=" << options.seed << " ";
+    params_ss << "feature_fraction_seed=" << options.seed << " ";
+    params_ss << "bagging_seed=" << options.seed << " ";
+    params_ss << "extra_seed=" << options.seed << " ";
     params_ss << "verbosity=-1 ";  // Force silent mode
+    params_ss << "deterministic=" << (options.deterministic ? "true" : "false") << " ";
     params_ss << "force_row_wise=true";
     std::string params_str = params_ss.str();
 
@@ -575,6 +581,13 @@ int OmegaTrainer::TrainModel(
     booster_params << "boost_from_average=false ";
     booster_params << "verbosity=-1 ";  // Force silent mode
     booster_params << "num_threads=" << options.num_threads << " ";
+    booster_params << "seed=" << options.seed << " ";
+    booster_params << "data_random_seed=" << options.seed << " ";
+    booster_params << "feature_fraction_seed=" << options.seed << " ";
+    booster_params << "bagging_seed=" << options.seed << " ";
+    booster_params << "extra_seed=" << options.seed << " ";
+    booster_params << "deterministic="
+                   << (options.deterministic ? "true" : "false") << " ";
     booster_params << "scale_pos_weight=" << scale_pos_weight << " ";
     booster_params << "force_row_wise=true";
 

@@ -53,7 +53,9 @@ struct OmegaTrainerOptions {
   int num_iterations = 100;
   int num_leaves = 31;
   double learning_rate = 0.1;
-  int num_threads = 0;  // 0 = use all available
+  int num_threads = 0;  // 0 = use caller/default strategy
+  int seed = 42;
+  bool deterministic = true;
   bool verbose = false;
   size_t topk = 100;
 };
