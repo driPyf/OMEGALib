@@ -91,12 +91,12 @@ void omega_search_report_visit(OmegaSearchHandle handle, int node_id,
 //   handle: Search context handle
 //   node_id: ID of the visited node
 //   distance: Distance to the visited node
-//   should_consider: 1 if the HNSW ef-heap logic says this candidate should be
-//                    considered for insertion, 0 otherwise
+//   inserted_to_topk: 1 if the candidate was inserted into the current
+//                     result-set top-k, 0 otherwise
 // Returns:
 //   1 if inserted into the current result-set top-k, 0 otherwise
 int omega_search_report_visit_candidate(OmegaSearchHandle handle, int node_id,
-                                        float distance, int should_consider);
+                                        float distance, int inserted_to_topk);
 
 // Report a hop during search (stateful interface)
 // Parameters:

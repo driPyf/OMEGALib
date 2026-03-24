@@ -145,14 +145,14 @@ void omega_search_report_visit(OmegaSearchHandle handle, int node_id,
 }
 
 int omega_search_report_visit_candidate(OmegaSearchHandle handle, int node_id,
-                                        float distance, int should_consider) {
+                                        float distance, int inserted_to_topk) {
   if (!handle || !handle->context) {
     return 0;
   }
 
   try {
     return handle->context->ReportVisitCandidate(node_id, distance,
-                                                 should_consider != 0)
+                                                 inserted_to_topk != 0)
                ? 1
                : 0;
   } catch (...) {

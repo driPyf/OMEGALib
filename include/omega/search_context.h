@@ -20,6 +20,7 @@
 #include "omega/feature_extractor.h"
 #include <limits>
 #include <array>
+#include <functional>
 #include <vector>
 #include <unordered_set>
 #include <cstdint>
@@ -65,7 +66,7 @@ class SearchContext {
   // Report a node visit and let SearchContext maintain the result-set-sized
   // top-k structure directly. Returns whether the node was inserted into the
   // current top-k result set.
-  bool ReportVisitCandidate(int node_id, float distance, bool should_consider);
+  bool ReportVisitCandidate(int node_id, float distance, bool inserted_to_topk);
 
   // Report a hop during search
   void ReportHop();
@@ -131,11 +132,26 @@ class SearchContext {
   int k_;
   int window_size_;
   int k_train_;  // K value used for training (default 1)
-  bool use_weighted_bh_;  // Use Weighted BH method
+  // OMEGA treats top-k early stopping as k rank-wise "is the current top-1 for
+  // this masked view already good enough?" decisions. Those per-rank decisions
+  // are not independent: an optimistic decision at an earlier rank propagates
+  // into later masked ranks and compounds the final top-k recall error.
+  //
+  // Weighted Benjamini-Hochberg gives us a simple way to allocate different
+  // recall/confidence targets across ranks without introducing an extra tuning
+  // knob. Earlier ranks receive stricter targets, later ranks receive slightly
+  // looser ones, and the aggregate decision better matches the desired overall
+  // top-k recall under this error accumulation pattern.
+  // Reference: Benjamini and Hochberg (1995), "Controlling the False
+  // Discovery Rate: A Practical and Powerful Approach to Multiple Testing",
+  // JRSS B, https://doi.org/10.1111/j.2517-6161.1995.tb02031.x
+  bool use_weighted_bh_;  // Use Weighted BH rank-wise recall targets.
 
   // Search state
   std::vector<std::pair<int, float>> traversal_window_buffer_;  // Ring buffer storage.
-  std::vector<TopCandidate> top_candidates_;  // Current top-K candidates, sorted by distance
+  std::vector<TopCandidate> top_candidates_;  // Current top-K candidates as a bounded heap.
+  mutable std::vector<TopCandidate> top_candidates_sorted_cache_;
+  mutable bool top_candidates_sorted_cache_valid_;
   int traversal_window_head_;
   int traversal_window_size_;
   int hops_;
@@ -149,6 +165,10 @@ class SearchContext {
   bool early_stop_hit_;
 
   // Weighted BH state (Phase 4)
+  // These arrays hold the per-rank targets/intervals derived from the global
+  // target recall. They let SearchContext confirm ranks incrementally while
+  // accounting for the fact that OMEGA decomposes top-k into multiple masked
+  // top-1 style decisions whose errors can accumulate across ranks.
   std::vector<float> recall_targets_;  // Recall target for each rank
   std::vector<int> initial_intervals_;  // Initial prediction interval for each rank
   std::vector<int> min_intervals_;  // Minimum prediction interval for each rank
@@ -180,6 +200,10 @@ class SearchContext {
 
   // Maintain the current top-k candidates like the reference implementation.
   bool UpdateTopCandidates(int node_id, float distance, int cmps);
+  static bool TopCandidateLess(const TopCandidate& lhs,
+                               const TopCandidate& rhs);
+  const std::vector<TopCandidate>& GetSortedTopCandidates() const;
+  int TopCandidateCount() const;
   void PushTraversalWindow(int node_id, float distance);
   void CopyTraversalWindowTo(std::vector<std::pair<int, float>>* out) const;
 

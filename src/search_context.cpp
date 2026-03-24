@@ -18,8 +18,70 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <mutex>
+#include <unordered_map>
+#include <utility>
 
 namespace omega {
+
+namespace {
+
+struct WeightedBhCacheKey {
+  int k;
+  int k_train;
+
+  bool operator==(const WeightedBhCacheKey& other) const {
+    return k == other.k && k_train == other.k_train;
+  }
+};
+
+struct WeightedBhCacheKeyHash {
+  size_t operator()(const WeightedBhCacheKey& key) const {
+    return (static_cast<size_t>(static_cast<uint32_t>(key.k)) << 32) ^
+           static_cast<size_t>(static_cast<uint32_t>(key.k_train));
+  }
+};
+
+const std::vector<float>& GetWeightedBhRatios(int k, int k_train) {
+  static std::mutex cache_mutex;
+  static std::unordered_map<WeightedBhCacheKey, std::vector<float>,
+                            WeightedBhCacheKeyHash>
+      ratios_cache;
+
+  const WeightedBhCacheKey key{k, k_train};
+  std::lock_guard<std::mutex> lock(cache_mutex);
+  auto it = ratios_cache.find(key);
+  if (it != ratios_cache.end()) {
+    return it->second;
+  }
+
+  auto [inserted_it, _] = ratios_cache.emplace(key, std::vector<float>(k, 0.0f));
+  auto& ratios = inserted_it->second;
+  if (k <= 0 || k_train <= 0) {
+    return ratios;
+  }
+
+  const int block_count = (k + k_train - 1) / k_train;
+  std::vector<float> weights(block_count, 0.0f);
+  std::vector<float> prefix(block_count + 1, 0.0f);
+  for (int block = 0; block < block_count; ++block) {
+    weights[block] = 1.0f / std::sqrt(static_cast<float>(block + 1));
+    prefix[block + 1] = prefix[block] + weights[block];
+  }
+
+  const float total_weight = prefix[block_count];
+  if (total_weight <= 0.0f) {
+    return ratios;
+  }
+
+  for (int i = 0; i < k; ++i) {
+    const int included_blocks = i / k_train + 1;
+    ratios[i] = prefix[included_blocks] / total_weight;
+  }
+  return ratios;
+}
+
+}  // namespace
 
 SearchContext::SearchContext(const GBDTModel* model, const ModelTables* tables,
                              float target_recall, int k, int window_size)
@@ -30,6 +92,7 @@ SearchContext::SearchContext(const GBDTModel* model, const ModelTables* tables,
       window_size_(window_size),
       k_train_(1),  // Phase 4: K value for training
       use_weighted_bh_(true),  // Phase 4: Enable Weighted BH by default
+      top_candidates_sorted_cache_valid_(true),
       traversal_window_head_(0),
       traversal_window_size_(0),
       hops_(0),
@@ -74,6 +137,8 @@ void SearchContext::Reset() {
   traversal_window_head_ = 0;
   traversal_window_size_ = 0;
   top_candidates_.clear();
+  top_candidates_sorted_cache_.clear();
+  top_candidates_sorted_cache_valid_ = true;
   hops_ = 0;
   comparisons_ = 0;
   dist_start_ = std::numeric_limits<float>::max();
@@ -103,33 +168,54 @@ void SearchContext::Reset() {
 }
 
 bool SearchContext::UpdateTopCandidates(int node_id, float distance, int cmps) {
-  TopCandidate candidate{node_id, distance, cmps};
-  auto pos = std::lower_bound(
-      top_candidates_.begin(), top_candidates_.end(), candidate,
-      [](const TopCandidate& lhs, const TopCandidate& rhs) {
-        if (lhs.distance != rhs.distance) {
-          return lhs.distance < rhs.distance;
-        }
-        return lhs.id < rhs.id;
-      });
+  if (k_ <= 0) {
+    return false;
+  }
 
-  if (static_cast<int>(top_candidates_.size()) == k_) {
-    const auto& worst = top_candidates_.back();
-    if (worst.distance < distance ||
-        (worst.distance == distance && worst.id <= node_id)) {
+  TopCandidate candidate{node_id, distance, cmps};
+  if (TopCandidateCount() == k_) {
+    const auto& worst = top_candidates_.front();
+    if (!TopCandidateLess(candidate, worst)) {
       return false;
     }
+
+    std::pop_heap(top_candidates_.begin(), top_candidates_.end(),
+                  TopCandidateLess);
+    top_candidates_.back() = candidate;
+    std::push_heap(top_candidates_.begin(), top_candidates_.end(),
+                   TopCandidateLess);
+  } else {
+    top_candidates_.push_back(candidate);
+    std::push_heap(top_candidates_.begin(), top_candidates_.end(),
+                   TopCandidateLess);
   }
 
-  top_candidates_.insert(pos, candidate);
-
-  if (static_cast<int>(top_candidates_.size()) > k_) {
-    top_candidates_.pop_back();
-  }
-
-  dist_1st_ = top_candidates_.empty() ? std::numeric_limits<float>::max()
-                                      : top_candidates_.front().distance;
+  top_candidates_sorted_cache_valid_ = false;
+  dist_1st_ = std::min(dist_1st_, distance);
   return true;
+}
+
+bool SearchContext::TopCandidateLess(const TopCandidate& lhs,
+                                     const TopCandidate& rhs) {
+  if (lhs.distance != rhs.distance) {
+    return lhs.distance < rhs.distance;
+  }
+  return lhs.id < rhs.id;
+}
+
+const std::vector<SearchContext::TopCandidate>&
+SearchContext::GetSortedTopCandidates() const {
+  if (!top_candidates_sorted_cache_valid_) {
+    top_candidates_sorted_cache_ = top_candidates_;
+    std::sort(top_candidates_sorted_cache_.begin(),
+              top_candidates_sorted_cache_.end(), TopCandidateLess);
+    top_candidates_sorted_cache_valid_ = true;
+  }
+  return top_candidates_sorted_cache_;
+}
+
+int SearchContext::TopCandidateCount() const {
+  return static_cast<int>(top_candidates_.size());
 }
 
 void SearchContext::PushTraversalWindow(int node_id, float distance) {
@@ -230,15 +316,14 @@ void SearchContext::ReportVisit(int node_id, float distance, bool is_in_topk) {
 }
 
 bool SearchContext::ReportVisitCandidate(int node_id, float distance,
-                                         bool should_consider) {
+                                         bool inserted_to_topk) {
   comparisons_++;
   PushTraversalWindow(node_id, distance);
 
-  bool inserted_into_topk = false;
-  if (should_consider) {
-    inserted_into_topk = UpdateTopCandidates(node_id, distance, comparisons_);
+  if (inserted_to_topk) {
+    UpdateTopCandidates(node_id, distance, comparisons_);
 
-    if (inserted_into_topk && training_mode_enabled_ && !ground_truth_.empty() &&
+    if (training_mode_enabled_ && !ground_truth_.empty() &&
         gt_found_set_.find(node_id) == gt_found_set_.end()) {
       for (size_t rank = 0; rank < ground_truth_.size(); ++rank) {
         if (ground_truth_[rank] == node_id) {
@@ -280,7 +365,7 @@ bool SearchContext::ReportVisitCandidate(int node_id, float distance,
 
     training_records_.push_back(record);
   }
-  return inserted_into_topk;
+  return inserted_to_topk;
 }
 
 void SearchContext::ReportHop() {
@@ -299,8 +384,7 @@ void SearchContext::ReportHop() {
 
 bool SearchContext::ShouldPredict() const {
   // Check if we have enough results and reached prediction point
-  return comparisons_ >= next_prediction_cmps_ &&
-         static_cast<int>(top_candidates_.size()) >= k_;
+  return comparisons_ >= next_prediction_cmps_ && TopCandidateCount() >= k_;
 }
 
 void SearchContext::GetStats(int* hops, int* comparisons, int* collected_gt) const {
@@ -347,7 +431,7 @@ bool SearchContext::ShouldStopEarly() {
   }
 
   // Phase 4: collected_gt iteration with per-K prediction
-  if (use_weighted_bh_ && static_cast<int>(top_candidates_.size()) >= k_) {
+  if (use_weighted_bh_ && TopCandidateCount() >= k_) {
     CopyTraversalWindowTo(&sorted_window_scratch_);
     std::sort(sorted_window_scratch_.begin(), sorted_window_scratch_.end(),
               [](const auto& a, const auto& b) { return a.second < b.second; });
@@ -518,7 +602,7 @@ bool SearchContext::ShouldStopEarly() {
   next_prediction_cmps_ = comparisons_ + interval_adjustment;
 
   // Update collected_gt based on topk
-  collected_gt_ = static_cast<int>(top_candidates_.size());
+  collected_gt_ = TopCandidateCount();
 
   // Stop if we've reached target recall
   if (predicted_recall >= target_recall_) {
@@ -553,9 +637,10 @@ std::vector<float> SearchContext::ExtractFeatures() {
 
   // Get 7-dim traversal window statistics
   // masked_ids: nodes already in topk (for per-K prediction)
+  const auto& top_candidates = GetSortedTopCandidates();
   std::vector<int> masked_ids;
-  masked_ids.reserve(top_candidates_.size());
-  for (const auto& candidate : top_candidates_) {
+  masked_ids.reserve(top_candidates.size());
+  for (const auto& candidate : top_candidates) {
     masked_ids.push_back(candidate.id);
   }
 
@@ -668,10 +753,16 @@ float SearchContext::PredictWithFeatureArray(
       model_->PredictRaw(features_double.data(),
                          static_cast<int32_t>(features_double.size()));
 
-  // Apply sigmoid to get probability
+  // Apply sigmoid to get the raw model confidence.
   double probability = 1.0 / (1.0 + std::exp(-raw_score));
 
-  // Map probability to recall using threshold_table
+  // Map the raw confidence to calibrated recall using threshold_table.
+  // The threshold table is learned with isotonic regression during training so
+  // that this score behaves like the true probability that the current masked
+  // top-1 decision is correct. That calibration matters because Weighted BH
+  // consumes these rank-wise confidence values as if they were comparable
+  // probability/confidence statements; using the uncalibrated model score would
+  // bias the per-rank targets and make the final top-k control less reliable.
   if (!tables_ || tables_->threshold_table.empty()) {
     if (collect_timing_) {
       prediction_eval_time_ns_ +=
@@ -718,21 +809,23 @@ std::pair<int, int> SearchContext::GetPredictionInterval(float target_recall) {
 }
 
 // Phase 4: Initialize Weighted BH method
+// OMEGA's rank-wise prediction loop effectively turns one top-k stopping
+// decision into k masked top-1 confirmation problems. A false positive at an
+// early rank contaminates all later masked ranks, so the per-rank prediction
+// errors accumulate. Weighted BH gives us a principled way to distribute the
+// overall recall budget across ranks: earlier ranks keep stricter targets,
+// later ranks can relax slightly, and we do not need an extra hand-tuned
+// hyperparameter to control that schedule.
 void SearchContext::InitializeWeightedBH() {
   recall_targets_.resize(k_);
   initial_intervals_.resize(k_);
   min_intervals_.resize(k_);
 
   if (use_weighted_bh_) {
+    const auto& bh_ratios = GetWeightedBhRatios(k_, k_train_);
     for (int i = 0; i < k_; i++) {
-      float a = 0.0f, b = 0.0f;
-      for (int j = 1; j <= i + 1; j += k_train_) {
-        a += 1.0f / std::sqrt((j - 1) / k_train_ + 1);
-      }
-      for (int j = 1; j <= k_; j += k_train_) {
-        b += 1.0f / std::sqrt((j - 1) / k_train_ + 1);
-      }
-      float curr_recall_target = 1.0f - (1.0f - target_recall_) * (a / b);
+      float curr_recall_target =
+          1.0f - (1.0f - target_recall_) * bh_ratios[i];
       float mid_recall_target = (1.0f + target_recall_) / 2.0f;
       recall_targets_[i] = std::min(mid_recall_target, curr_recall_target);
 
@@ -745,24 +838,25 @@ void SearchContext::InitializeWeightedBH() {
 
 // Phase 4: Extract features for specific rank (per-K prediction)
 std::vector<float> SearchContext::ExtractFeaturesForRank(int idx) {
-  if (idx < 0 || idx >= static_cast<int>(top_candidates_.size())) {
+  const auto& top_candidates = GetSortedTopCandidates();
+  if (idx < 0 || idx >= static_cast<int>(top_candidates.size())) {
     return std::vector<float>();
   }
 
   std::vector<float> features(11);
   features[0] = static_cast<float>(hops_);
   features[1] = static_cast<float>(comparisons_ - idx);
-  features[2] = top_candidates_[idx].distance;
+  features[2] = top_candidates[idx].distance;
   features[3] = dist_start_;
 
   // Compute masked_ids: all candidates before idx
   std::vector<int> masked_ids;
   for (int prev_idx = 0;
        prev_idx + k_train_ - 1 < idx &&
-       prev_idx < static_cast<int>(top_candidates_.size());
+       prev_idx < static_cast<int>(top_candidates.size());
        ++prev_idx) {
-    if (comparisons_ - top_candidates_[prev_idx].cmps <= window_size_) {
-      masked_ids.push_back(top_candidates_[prev_idx].id);
+    if (comparisons_ - top_candidates[prev_idx].cmps <= window_size_) {
+      masked_ids.push_back(top_candidates[prev_idx].id);
     }
   }
   std::sort(masked_ids.begin(), masked_ids.end());
@@ -776,7 +870,7 @@ std::vector<float> SearchContext::ExtractFeaturesForRank(int idx) {
 
 // Phase 4: Predict recall for specific rank
 float SearchContext::PredictRecallForRank(int idx) {
-  if (!model_ || idx < 0 || idx >= static_cast<int>(top_candidates_.size())) {
+  if (!model_ || idx < 0 || idx >= TopCandidateCount()) {
     return 0.0f;
   }
 
@@ -789,23 +883,24 @@ float SearchContext::PredictRecallForRank(int idx) {
 
 float SearchContext::PredictRecallForRankWithSortedWindow(
     int idx, const std::vector<std::pair<int, float>>& sorted_window) {
-  if (!model_ || idx < 0 || idx >= static_cast<int>(top_candidates_.size())) {
+  const auto& top_candidates = GetSortedTopCandidates();
+  if (!model_ || idx < 0 || idx >= static_cast<int>(top_candidates.size())) {
     return 0.0f;
   }
 
   std::array<float, 11> features{};
   features[0] = static_cast<float>(hops_);
   features[1] = static_cast<float>(comparisons_ - idx);
-  features[2] = top_candidates_[idx].distance;
+  features[2] = top_candidates[idx].distance;
   features[3] = dist_start_;
 
   masked_ids_scratch_.clear();
   for (int prev_idx = 0;
        prev_idx + k_train_ - 1 < idx &&
-       prev_idx < static_cast<int>(top_candidates_.size());
+       prev_idx < static_cast<int>(top_candidates.size());
        ++prev_idx) {
-    if (comparisons_ - top_candidates_[prev_idx].cmps <= window_size_) {
-      masked_ids_scratch_.push_back(top_candidates_[prev_idx].id);
+    if (comparisons_ - top_candidates[prev_idx].cmps <= window_size_) {
+      masked_ids_scratch_.push_back(top_candidates[prev_idx].id);
     }
   }
   std::sort(masked_ids_scratch_.begin(), masked_ids_scratch_.end());
@@ -882,6 +977,8 @@ void SearchContext::EnableTrainingMode(int query_id, const std::vector<int>& gro
   k_train_ = k_train;
   traversal_window_stats_cache_.clear();  // Clear cache for new query
   top_candidates_.clear();
+  top_candidates_sorted_cache_.clear();
+  top_candidates_sorted_cache_valid_ = true;
   traversal_window_head_ = 0;
   traversal_window_size_ = 0;
   dist_1st_ = std::numeric_limits<float>::max();

@@ -27,9 +27,18 @@ namespace omega {
 // These tables are generated during model training and map model outputs
 // to search parameters.
 struct ModelTables {
-  // Maps threshold value (scaled by 10000) to expected recall
-  // Format: threshold_table[int(threshold * 10000)] = recall
-  // Using std::map for ordered lookup
+  // Maps calibrated confidence (scaled by 10000) to expected recall.
+  // Format: threshold_table[int(confidence * 10000)] = recall
+  //
+  // This table is produced during training via isotonic regression. The goal is
+  // calibration, not just ranking: we want the model's confidence score to
+  // approximate the true probability that the masked top-1 decision is
+  // correct. Weighted BH relies on those per-rank confidence values being
+  // probability-like; without calibration, the rank-wise error budget would be
+  // systematically misallocated when lifted from top-1 decisions to the final
+  // top-k stopping rule.
+  //
+  // Using std::map for ordered lookup.
   std::map<int, float> threshold_table;
 
   // Maps recall (scaled by 100) to (initial_interval, min_interval)
