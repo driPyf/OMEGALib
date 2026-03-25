@@ -152,7 +152,6 @@ class SearchContext {
   std::vector<TopCandidate> top_candidates_;  // Current top-K candidates as a bounded heap.
   mutable std::vector<TopCandidate> top_candidates_sorted_cache_;
   mutable bool top_candidates_sorted_cache_valid_;
-  bool traversal_window_collecting_;
   int traversal_window_head_;
   int traversal_window_size_;
   int hops_;
@@ -201,15 +200,6 @@ class SearchContext {
 
   // Maintain the current top-k candidates like the reference implementation.
   bool UpdateTopCandidates(int node_id, float distance, int cmps);
-  inline bool ShouldTrackTraversalWindow() const {
-    if (training_mode_enabled_) {
-      return true;
-    }
-    if (!model_ || !tables_) {
-      return false;
-    }
-    return comparisons_ + window_size_ > next_prediction_cmps_;
-  }
   static bool TopCandidateLess(const TopCandidate& lhs,
                                const TopCandidate& rhs);
   const std::vector<TopCandidate>& GetSortedTopCandidates() const;
