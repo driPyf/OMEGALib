@@ -93,6 +93,7 @@ SearchContext::SearchContext(const GBDTModel* model, const ModelTables* tables,
       k_train_(1),  // Phase 4: K value for training
       use_weighted_bh_(true),  // Phase 4: Enable Weighted BH by default
       top_candidates_sorted_cache_valid_(true),
+      traversal_window_collecting_(false),
       traversal_window_head_(0),
       traversal_window_size_(0),
       hops_(0),
@@ -136,6 +137,7 @@ SearchContext::~SearchContext() = default;
 void SearchContext::Reset() {
   traversal_window_head_ = 0;
   traversal_window_size_ = 0;
+  traversal_window_collecting_ = false;
   top_candidates_.clear();
   top_candidates_sorted_cache_.clear();
   top_candidates_sorted_cache_valid_ = true;
@@ -251,7 +253,18 @@ void SearchContext::CopyTraversalWindowTo(
 void SearchContext::ReportVisit(int node_id, float distance, bool is_in_topk) {
   comparisons_++;
 
-  PushTraversalWindow(node_id, distance);
+  if (ShouldTrackTraversalWindow()) {
+    if (!traversal_window_collecting_) {
+      traversal_window_head_ = 0;
+      traversal_window_size_ = 0;
+      traversal_window_collecting_ = true;
+    }
+    PushTraversalWindow(node_id, distance);
+  } else if (traversal_window_collecting_) {
+    traversal_window_head_ = 0;
+    traversal_window_size_ = 0;
+    traversal_window_collecting_ = false;
+  }
 
   // Update topk tracking
   if (is_in_topk) {
@@ -318,7 +331,18 @@ void SearchContext::ReportVisit(int node_id, float distance, bool is_in_topk) {
 bool SearchContext::ReportVisitCandidate(int node_id, float distance,
                                          bool inserted_to_topk) {
   comparisons_++;
-  PushTraversalWindow(node_id, distance);
+  if (ShouldTrackTraversalWindow()) {
+    if (!traversal_window_collecting_) {
+      traversal_window_head_ = 0;
+      traversal_window_size_ = 0;
+      traversal_window_collecting_ = true;
+    }
+    PushTraversalWindow(node_id, distance);
+  } else if (traversal_window_collecting_) {
+    traversal_window_head_ = 0;
+    traversal_window_size_ = 0;
+    traversal_window_collecting_ = false;
+  }
 
   if (inserted_to_topk) {
     UpdateTopCandidates(node_id, distance, comparisons_);
@@ -981,6 +1005,7 @@ void SearchContext::EnableTrainingMode(int query_id, const std::vector<int>& gro
   top_candidates_sorted_cache_valid_ = true;
   traversal_window_head_ = 0;
   traversal_window_size_ = 0;
+  traversal_window_collecting_ = false;
   dist_1st_ = std::numeric_limits<float>::max();
 
   // Initialize gt_cmps_per_rank with -1 (will be set to total_cmps at end if not found)
