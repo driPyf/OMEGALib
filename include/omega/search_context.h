@@ -100,6 +100,17 @@ class SearchContext {
   uint64_t GetPredictionFeaturePrepTimeNs() const {
     return prediction_feature_prep_time_ns_;
   }
+  uint64_t GetReportVisitCandidateTimeNs() const {
+    return report_visit_candidate_time_ns_;
+  }
+  uint64_t GetShouldPredictTimeNs() const { return should_predict_time_ns_; }
+  uint64_t GetReportHopTimeNs() const { return report_hop_time_ns_; }
+  uint64_t GetUpdateTopCandidatesTimeNs() const {
+    return update_top_candidates_time_ns_;
+  }
+  uint64_t GetPushTraversalWindowTimeNs() const {
+    return push_traversal_window_time_ns_;
+  }
   uint64_t GetCollectedGtAdvanceCount() const {
     return collected_gt_advance_count_;
   }
@@ -190,10 +201,15 @@ class SearchContext {
   uint64_t sorted_window_time_ns_;
   uint64_t average_recall_eval_time_ns_;
   uint64_t prediction_feature_prep_time_ns_;
+  uint64_t report_visit_candidate_time_ns_;
+  mutable uint64_t should_predict_time_ns_;
+  uint64_t report_hop_time_ns_;
+  uint64_t update_top_candidates_time_ns_;
+  uint64_t push_traversal_window_time_ns_;
   uint64_t collected_gt_advance_count_;
   uint64_t should_stop_calls_with_advance_;
   uint64_t max_prediction_calls_per_should_stop_;
-  bool collect_timing_;
+  mutable bool collect_timing_;
 
   // Initialize Weighted BH method (Phase 4)
   void InitializeWeightedBH();

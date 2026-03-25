@@ -113,6 +113,11 @@ SearchContext::SearchContext(const GBDTModel* model, const ModelTables* tables,
       sorted_window_time_ns_(0),
       average_recall_eval_time_ns_(0),
       prediction_feature_prep_time_ns_(0),
+      report_visit_candidate_time_ns_(0),
+      should_predict_time_ns_(0),
+      report_hop_time_ns_(0),
+      update_top_candidates_time_ns_(0),
+      push_traversal_window_time_ns_(0),
       collected_gt_advance_count_(0),
       should_stop_calls_with_advance_(0),
       max_prediction_calls_per_should_stop_(0),
@@ -155,6 +160,11 @@ void SearchContext::Reset() {
   sorted_window_time_ns_ = 0;
   average_recall_eval_time_ns_ = 0;
   prediction_feature_prep_time_ns_ = 0;
+  report_visit_candidate_time_ns_ = 0;
+  should_predict_time_ns_ = 0;
+  report_hop_time_ns_ = 0;
+  update_top_candidates_time_ns_ = 0;
+  push_traversal_window_time_ns_ = 0;
   collected_gt_advance_count_ = 0;
   should_stop_calls_with_advance_ = 0;
   max_prediction_calls_per_should_stop_ = 0;
@@ -317,11 +327,33 @@ void SearchContext::ReportVisit(int node_id, float distance, bool is_in_topk) {
 
 bool SearchContext::ReportVisitCandidate(int node_id, float distance,
                                          bool inserted_to_topk) {
+  ProfilingTimer::tick_t func_start = 0;
+  if (collect_timing_) {
+    func_start = ProfilingTimer::Now();
+  }
+
   comparisons_++;
+
+  ProfilingTimer::tick_t push_start = 0;
+  if (collect_timing_) {
+    push_start = ProfilingTimer::Now();
+  }
   PushTraversalWindow(node_id, distance);
+  if (collect_timing_) {
+    push_traversal_window_time_ns_ +=
+        ProfilingTimer::ElapsedNs(push_start, ProfilingTimer::Now());
+  }
 
   if (inserted_to_topk) {
+    ProfilingTimer::tick_t update_start = 0;
+    if (collect_timing_) {
+      update_start = ProfilingTimer::Now();
+    }
     UpdateTopCandidates(node_id, distance, comparisons_);
+    if (collect_timing_) {
+      update_top_candidates_time_ns_ +=
+          ProfilingTimer::ElapsedNs(update_start, ProfilingTimer::Now());
+    }
 
     if (training_mode_enabled_ && !ground_truth_.empty() &&
         gt_found_set_.find(node_id) == gt_found_set_.end()) {
@@ -365,10 +397,20 @@ bool SearchContext::ReportVisitCandidate(int node_id, float distance,
 
     training_records_.push_back(record);
   }
+
+  if (collect_timing_) {
+    report_visit_candidate_time_ns_ +=
+        ProfilingTimer::ElapsedNs(func_start, ProfilingTimer::Now());
+  }
   return inserted_to_topk;
 }
 
 void SearchContext::ReportHop() {
+  ProfilingTimer::tick_t func_start = 0;
+  if (collect_timing_) {
+    func_start = ProfilingTimer::Now();
+  }
+
   hops_++;
 
   // Phase 5: Compute traversal window stats cache for training mode
@@ -380,11 +422,27 @@ void SearchContext::ReportHop() {
     std::vector<int> masked_ids;  // Empty for training mode (like original OMEGA)
     traversal_window_stats_cache_ = GetTraversalWindowStats(masked_ids);
   }
+
+  if (collect_timing_) {
+    report_hop_time_ns_ +=
+        ProfilingTimer::ElapsedNs(func_start, ProfilingTimer::Now());
+  }
 }
 
 bool SearchContext::ShouldPredict() const {
+  ProfilingTimer::tick_t func_start = 0;
+  if (collect_timing_) {
+    func_start = ProfilingTimer::Now();
+  }
+
   // Check if we have enough results and reached prediction point
-  return comparisons_ >= next_prediction_cmps_ && TopCandidateCount() >= k_;
+  bool result = comparisons_ >= next_prediction_cmps_ && TopCandidateCount() >= k_;
+
+  if (collect_timing_) {
+    should_predict_time_ns_ +=
+        ProfilingTimer::ElapsedNs(func_start, ProfilingTimer::Now());
+  }
+  return result;
 }
 
 void SearchContext::GetStats(int* hops, int* comparisons, int* collected_gt) const {
