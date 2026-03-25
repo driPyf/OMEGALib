@@ -78,6 +78,10 @@ class SearchContext {
   // Based on interval_table and current comparison count
   bool ShouldPredict() const;
 
+  // Check if should track traversal window
+  // Only track when close to next prediction point
+  bool ShouldTrackTraversalWindow() const;
+
   // Predict whether to stop early based on current state and target recall.
   // Returns true if the search should stop, false to continue.
   bool ShouldStopEarly();

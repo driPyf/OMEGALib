@@ -334,14 +334,17 @@ bool SearchContext::ReportVisitCandidate(int node_id, float distance,
 
   comparisons_++;
 
-  ProfilingTimer::tick_t push_start = 0;
-  if (collect_timing_) {
-    push_start = ProfilingTimer::Now();
-  }
-  PushTraversalWindow(node_id, distance);
-  if (collect_timing_) {
-    push_traversal_window_time_ns_ +=
-        ProfilingTimer::ElapsedNs(push_start, ProfilingTimer::Now());
+  // Only track traversal window when close to next prediction point
+  if (ShouldTrackTraversalWindow()) {
+    ProfilingTimer::tick_t push_start = 0;
+    if (collect_timing_) {
+      push_start = ProfilingTimer::Now();
+    }
+    PushTraversalWindow(node_id, distance);
+    if (collect_timing_) {
+      push_traversal_window_time_ns_ +=
+          ProfilingTimer::ElapsedNs(push_start, ProfilingTimer::Now());
+    }
   }
 
   if (inserted_to_topk) {
@@ -443,6 +446,22 @@ bool SearchContext::ShouldPredict() const {
         ProfilingTimer::ElapsedNs(func_start, ProfilingTimer::Now());
   }
   return result;
+}
+
+bool SearchContext::ShouldTrackTraversalWindow() const {
+  // Training mode: always track (need all data for training)
+  if (training_mode_enabled_) {
+    return true;
+  }
+
+  // No model loaded: no prediction will happen
+  if (!model_ || !tables_) {
+    return false;
+  }
+
+  // Only track when we're within window_size of next prediction point
+  // This avoids unnecessary ring buffer operations when prediction is far away
+  return comparisons_ + window_size_ >= next_prediction_cmps_;
 }
 
 void SearchContext::GetStats(int* hops, int* comparisons, int* collected_gt) const {
