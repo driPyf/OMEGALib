@@ -431,7 +431,7 @@ bool SearchContext::ShouldStopEarly() {
         double recall_from_gt_cmps =
             GetRecallFromGtCmpsAllTable(i, comparisons_);
         predicted_recall_avg +=
-            std::max(recall_from_gt_collected, recall_from_gt_cmps);
+            std::min(recall_from_gt_collected, recall_from_gt_cmps);
       }
     }
     predicted_recall_avg /= k_;
