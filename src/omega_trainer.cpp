@@ -145,94 +145,6 @@ double BinaryLogLoss(const std::vector<float>& predictions,
   return loss / static_cast<double>(predictions.size());
 }
 
-void WritePredictionTraceCsv(const std::string& output_path,
-                             const std::vector<int>& query_ids,
-                             const std::vector<float>& predictions,
-                             const std::vector<float>& labels) {
-  if (predictions.size() != labels.size() || predictions.size() != query_ids.size()) {
-    return;
-  }
-
-  std::ofstream ofs(output_path);
-  if (!ofs.is_open()) {
-    return;
-  }
-
-  ofs << "query_id,prediction,label\n";
-  for (size_t i = 0; i < predictions.size(); ++i) {
-    ofs << query_ids[i] << ","
-        << std::fixed << std::setprecision(6) << predictions[i] << ","
-        << static_cast<int>(labels[i] > 0.5f) << "\n";
-  }
-}
-
-void WriteCalibrationBucketsCsv(const std::string& output_path,
-                                const std::vector<float>& predictions,
-                                const std::vector<float>& labels,
-                                int bucket_count,
-                                bool verbose,
-                                const char* split_name) {
-  if (predictions.empty() || predictions.size() != labels.size() || bucket_count <= 0) {
-    return;
-  }
-
-  struct BucketStats {
-    int count = 0;
-    double pred_sum = 0.0;
-    double label_sum = 0.0;
-  };
-
-  std::vector<BucketStats> buckets(static_cast<size_t>(bucket_count));
-  for (size_t i = 0; i < predictions.size(); ++i) {
-    const double p = std::min(0.999999, std::max(0.0, static_cast<double>(predictions[i])));
-    int idx = static_cast<int>(p * bucket_count);
-    if (idx >= bucket_count) {
-      idx = bucket_count - 1;
-    }
-    BucketStats& bucket = buckets[static_cast<size_t>(idx)];
-    bucket.count += 1;
-    bucket.pred_sum += p;
-    bucket.label_sum += (labels[i] > 0.5f ? 1.0 : 0.0);
-  }
-
-  std::ofstream ofs(output_path);
-  if (!ofs.is_open()) {
-    return;
-  }
-
-  ofs << "bucket_start,bucket_end,count,avg_prediction,positive_rate\n";
-  for (int i = 0; i < bucket_count; ++i) {
-    const BucketStats& bucket = buckets[static_cast<size_t>(i)];
-    const double begin = static_cast<double>(i) / bucket_count;
-    const double end = static_cast<double>(i + 1) / bucket_count;
-    const double avg_prediction =
-        bucket.count > 0 ? bucket.pred_sum / bucket.count : 0.0;
-    const double positive_rate =
-        bucket.count > 0 ? bucket.label_sum / bucket.count : 0.0;
-    ofs << std::fixed << std::setprecision(6)
-        << begin << "," << end << "," << bucket.count << ","
-        << avg_prediction << "," << positive_rate << "\n";
-  }
-
-  if (verbose) {
-    std::cout << "[OMEGA] " << split_name << " calibration buckets:" << std::endl;
-    for (int i = 0; i < bucket_count; ++i) {
-      const BucketStats& bucket = buckets[static_cast<size_t>(i)];
-      if (bucket.count == 0) {
-        continue;
-      }
-      const double begin = static_cast<double>(i) / bucket_count;
-      const double end = static_cast<double>(i + 1) / bucket_count;
-      const double avg_prediction = bucket.pred_sum / bucket.count;
-      const double positive_rate = bucket.label_sum / bucket.count;
-      std::cout << "[OMEGA]   [" << std::fixed << std::setprecision(2)
-                << begin << ", " << end << "): count=" << bucket.count
-                << " avg_pred=" << std::setprecision(6) << avg_prediction
-                << " positive_rate=" << positive_rate << std::endl;
-    }
-  }
-}
-
 // Helper to log with timing
 class ScopedTimer {
  public:
@@ -905,10 +817,6 @@ int OmegaTrainer::TrainModel(
 
   std::vector<float> train_labels(labels.begin(), labels.begin() + train_size);
   std::vector<float> test_labels(labels.begin() + train_size, labels.end());
-  std::vector<int> train_record_query_ids(
-      query_ids.begin(), query_ids.begin() + train_size);
-  std::vector<int> test_record_query_ids(
-      query_ids.begin() + train_size, query_ids.end());
 
   const double train_logloss = BinaryLogLoss(train_predictions, train_labels);
   const double valid_logloss = BinaryLogLoss(test_predictions, test_labels);
@@ -928,16 +836,6 @@ int OmegaTrainer::TrainModel(
                    best_iteration,
                    std::isfinite(best_valid_metric) ? best_valid_metric
                                                     : valid_logloss);
-  WritePredictionTraceCsv(options.output_dir + "/train_predictions.csv",
-                          train_record_query_ids, train_predictions, train_labels);
-  WritePredictionTraceCsv(options.output_dir + "/valid_predictions.csv",
-                          test_record_query_ids, test_predictions, test_labels);
-  WriteCalibrationBucketsCsv(options.output_dir + "/train_calibration_buckets.csv",
-                             train_predictions, train_labels, 20,
-                             options.verbose, "train");
-  WriteCalibrationBucketsCsv(options.output_dir + "/valid_calibration_buckets.csv",
-                             test_predictions, test_labels, 20,
-                             options.verbose, "valid");
 
   // Step 7: Generate threshold table
   {
