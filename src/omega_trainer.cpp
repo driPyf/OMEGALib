@@ -23,6 +23,7 @@
 #include <numeric>
 #include <sstream>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <unordered_map>
 #include "omega/tree_inference.h"
@@ -70,6 +71,166 @@ void WriteTimingStatsJson(
     ofs << "\n";
   }
   ofs << "}\n";
+}
+
+void WriteMetricsJson(
+    const std::string& output_path,
+    const std::vector<std::string>& metric_names,
+    const std::vector<std::pair<int, std::vector<double>>>& train_history,
+    const std::vector<std::pair<int, std::vector<double>>>& valid_history,
+    int best_iteration,
+    double best_valid_metric) {
+  std::ofstream ofs(output_path);
+  if (!ofs.is_open()) {
+    return;
+  }
+
+  ofs << "{\n";
+  ofs << "  \"metric_names\": [";
+  for (size_t i = 0; i < metric_names.size(); ++i) {
+    ofs << "\"" << metric_names[i] << "\"";
+    if (i + 1 < metric_names.size()) {
+      ofs << ", ";
+    }
+  }
+  ofs << "],\n";
+  ofs << "  \"best_iteration\": " << best_iteration << ",\n";
+  ofs << "  \"best_valid_metric\": " << std::fixed << std::setprecision(8)
+      << best_valid_metric << ",\n";
+
+  auto write_history = [&ofs](
+                           const char* key,
+                           const std::vector<std::pair<int, std::vector<double>>>& history) {
+    ofs << "  \"" << key << "\": [\n";
+    for (size_t i = 0; i < history.size(); ++i) {
+      ofs << "    {\"iteration\": " << history[i].first << ", \"values\": [";
+      for (size_t j = 0; j < history[i].second.size(); ++j) {
+        ofs << std::fixed << std::setprecision(8) << history[i].second[j];
+        if (j + 1 < history[i].second.size()) {
+          ofs << ", ";
+        }
+      }
+      ofs << "]}";
+      if (i + 1 < history.size()) {
+        ofs << ",";
+      }
+      ofs << "\n";
+    }
+    ofs << "  ]";
+  };
+
+  write_history("train_history", train_history);
+  ofs << ",\n";
+  write_history("valid_history", valid_history);
+  ofs << "\n}\n";
+}
+
+double ClampProbability(double p) {
+  constexpr double kEps = 1e-15;
+  return std::min(1.0 - kEps, std::max(kEps, p));
+}
+
+double BinaryLogLoss(const std::vector<float>& predictions,
+                     const std::vector<float>& labels) {
+  if (predictions.empty() || predictions.size() != labels.size()) {
+    return 0.0;
+  }
+
+  double loss = 0.0;
+  for (size_t i = 0; i < predictions.size(); ++i) {
+    const double p = ClampProbability(predictions[i]);
+    const double y = labels[i] > 0.5f ? 1.0 : 0.0;
+    loss += -(y * std::log(p) + (1.0 - y) * std::log(1.0 - p));
+  }
+  return loss / static_cast<double>(predictions.size());
+}
+
+void WritePredictionTraceCsv(const std::string& output_path,
+                             const std::vector<int>& query_ids,
+                             const std::vector<float>& predictions,
+                             const std::vector<float>& labels) {
+  if (predictions.size() != labels.size() || predictions.size() != query_ids.size()) {
+    return;
+  }
+
+  std::ofstream ofs(output_path);
+  if (!ofs.is_open()) {
+    return;
+  }
+
+  ofs << "query_id,prediction,label\n";
+  for (size_t i = 0; i < predictions.size(); ++i) {
+    ofs << query_ids[i] << ","
+        << std::fixed << std::setprecision(6) << predictions[i] << ","
+        << static_cast<int>(labels[i] > 0.5f) << "\n";
+  }
+}
+
+void WriteCalibrationBucketsCsv(const std::string& output_path,
+                                const std::vector<float>& predictions,
+                                const std::vector<float>& labels,
+                                int bucket_count,
+                                bool verbose,
+                                const char* split_name) {
+  if (predictions.empty() || predictions.size() != labels.size() || bucket_count <= 0) {
+    return;
+  }
+
+  struct BucketStats {
+    int count = 0;
+    double pred_sum = 0.0;
+    double label_sum = 0.0;
+  };
+
+  std::vector<BucketStats> buckets(static_cast<size_t>(bucket_count));
+  for (size_t i = 0; i < predictions.size(); ++i) {
+    const double p = std::min(0.999999, std::max(0.0, static_cast<double>(predictions[i])));
+    int idx = static_cast<int>(p * bucket_count);
+    if (idx >= bucket_count) {
+      idx = bucket_count - 1;
+    }
+    BucketStats& bucket = buckets[static_cast<size_t>(idx)];
+    bucket.count += 1;
+    bucket.pred_sum += p;
+    bucket.label_sum += (labels[i] > 0.5f ? 1.0 : 0.0);
+  }
+
+  std::ofstream ofs(output_path);
+  if (!ofs.is_open()) {
+    return;
+  }
+
+  ofs << "bucket_start,bucket_end,count,avg_prediction,positive_rate\n";
+  for (int i = 0; i < bucket_count; ++i) {
+    const BucketStats& bucket = buckets[static_cast<size_t>(i)];
+    const double begin = static_cast<double>(i) / bucket_count;
+    const double end = static_cast<double>(i + 1) / bucket_count;
+    const double avg_prediction =
+        bucket.count > 0 ? bucket.pred_sum / bucket.count : 0.0;
+    const double positive_rate =
+        bucket.count > 0 ? bucket.label_sum / bucket.count : 0.0;
+    ofs << std::fixed << std::setprecision(6)
+        << begin << "," << end << "," << bucket.count << ","
+        << avg_prediction << "," << positive_rate << "\n";
+  }
+
+  if (verbose) {
+    std::cout << "[OMEGA] " << split_name << " calibration buckets:" << std::endl;
+    for (int i = 0; i < bucket_count; ++i) {
+      const BucketStats& bucket = buckets[static_cast<size_t>(i)];
+      if (bucket.count == 0) {
+        continue;
+      }
+      const double begin = static_cast<double>(i) / bucket_count;
+      const double end = static_cast<double>(i + 1) / bucket_count;
+      const double avg_prediction = bucket.pred_sum / bucket.count;
+      const double positive_rate = bucket.label_sum / bucket.count;
+      std::cout << "[OMEGA]   [" << std::fixed << std::setprecision(2)
+                << begin << ", " << end << "): count=" << bucket.count
+                << " avg_pred=" << std::setprecision(6) << avg_prediction
+                << " positive_rate=" << positive_rate << std::endl;
+    }
+  }
 }
 
 // Helper to log with timing
@@ -507,6 +668,11 @@ int OmegaTrainer::TrainModel(
   DatasetHandle train_data = nullptr;
   DatasetHandle test_data = nullptr;
   BoosterHandle booster = nullptr;
+  std::vector<std::string> eval_metric_names;
+  std::vector<std::pair<int, std::vector<double>>> train_eval_history;
+  std::vector<std::pair<int, std::vector<double>>> valid_eval_history;
+  int best_iteration = -1;
+  double best_valid_metric = std::numeric_limits<double>::infinity();
 
   {
     ScopedTimer timer("CreateDataset", options.verbose);
@@ -606,6 +772,26 @@ int OmegaTrainer::TrainModel(
     // Add validation data
     LGBM_CHECK(LGBM_BoosterAddValidData(booster, test_data));
 
+    int eval_count = 0;
+    LGBM_CHECK(LGBM_BoosterGetEvalCounts(booster, &eval_count));
+    if (eval_count > 0) {
+      eval_metric_names.resize(static_cast<size_t>(eval_count));
+      std::vector<std::vector<char>> eval_name_storage(
+          static_cast<size_t>(eval_count), std::vector<char>(64, '\0'));
+      std::vector<char*> eval_name_ptrs;
+      eval_name_ptrs.reserve(static_cast<size_t>(eval_count));
+      for (auto& storage : eval_name_storage) {
+        eval_name_ptrs.push_back(storage.data());
+      }
+      int out_len = 0;
+      size_t out_buffer_len = 0;
+      LGBM_CHECK(LGBM_BoosterGetEvalNames(
+          booster, eval_count, &out_len, 64, &out_buffer_len, eval_name_ptrs.data()));
+      for (int i = 0; i < eval_count; ++i) {
+        eval_metric_names[static_cast<size_t>(i)] = eval_name_ptrs[static_cast<size_t>(i)];
+      }
+    }
+
     if (options.verbose) {
       std::cout << "[OMEGA] Starting training for " << options.num_iterations << " iterations..." << std::endl;
     }
@@ -617,6 +803,35 @@ int OmegaTrainer::TrainModel(
       }
       int is_finished = 0;
       LGBM_CHECK(LGBM_BoosterUpdateOneIter(booster, &is_finished));
+
+      if (!eval_metric_names.empty() &&
+          ((i + 1) % 10 == 0 || i + 1 == options.num_iterations || is_finished)) {
+        std::vector<double> train_eval(eval_metric_names.size(), 0.0);
+        std::vector<double> valid_eval(eval_metric_names.size(), 0.0);
+        int train_eval_len = 0;
+        int valid_eval_len = 0;
+        LGBM_CHECK(LGBM_BoosterGetEval(
+            booster, 0, &train_eval_len, train_eval.data()));
+        LGBM_CHECK(LGBM_BoosterGetEval(
+            booster, 1, &valid_eval_len, valid_eval.data()));
+        train_eval.resize(static_cast<size_t>(train_eval_len));
+        valid_eval.resize(static_cast<size_t>(valid_eval_len));
+        train_eval_history.emplace_back(i + 1, train_eval);
+        valid_eval_history.emplace_back(i + 1, valid_eval);
+
+        if (!valid_eval.empty() && valid_eval[0] < best_valid_metric) {
+          best_valid_metric = valid_eval[0];
+          best_iteration = i + 1;
+        }
+
+        if (options.verbose && !train_eval.empty() && !valid_eval.empty()) {
+          std::cout << "[OMEGA] iter=" << (i + 1)
+                    << " train_" << eval_metric_names[0] << "="
+                    << std::fixed << std::setprecision(8) << train_eval[0]
+                    << " valid_" << eval_metric_names[0] << "="
+                    << valid_eval[0] << std::endl;
+        }
+      }
 
       if (is_finished) {
         if (options.verbose) {
@@ -638,12 +853,33 @@ int OmegaTrainer::TrainModel(
     LGBM_CHECK(LGBM_BoosterSaveModel(booster, 0, -1, C_API_FEATURE_IMPORTANCE_SPLIT, model_path.c_str()));
   }
 
-  // Step 6: Get predictions on test set for threshold table
-  std::vector<float> test_predictions;  // Declare outside scope for use in Step 7
+  // Step 6: Get predictions on train/test sets for diagnostics and threshold table
+  std::vector<float> train_predictions;
+  std::vector<float> test_predictions;
   {
     ScopedTimer timer("Predict", options.verbose);
 
-    // LightGBM C API always outputs double, so use double array directly
+    std::vector<double> train_preds_double(train_size);
+    int64_t train_out_len = 0;
+    LGBM_CHECK(LGBM_BoosterPredictForMat(
+        booster,
+        features.data(),
+        C_API_DTYPE_FLOAT32,
+        train_size,
+        num_features,
+        1,
+        C_API_PREDICT_NORMAL,
+        0,
+        -1,
+        "",
+        &train_out_len,
+        train_preds_double.data()));
+    train_predictions.resize(train_size);
+    for (int i = 0; i < train_size; ++i) {
+      train_predictions[static_cast<size_t>(i)] =
+          static_cast<float>(train_preds_double[static_cast<size_t>(i)]);
+    }
+
     std::vector<double> test_preds_double(test_size);
     int64_t out_len = 0;
 
@@ -661,18 +897,50 @@ int OmegaTrainer::TrainModel(
         &out_len,
         test_preds_double.data()));
 
-    // Convert double to float for threshold table generation
     test_predictions.resize(test_size);
     for (int i = 0; i < test_size; ++i) {
       test_predictions[i] = static_cast<float>(test_preds_double[i]);
     }
   }
 
+  std::vector<float> train_labels(labels.begin(), labels.begin() + train_size);
+  std::vector<float> test_labels(labels.begin() + train_size, labels.end());
+  std::vector<int> train_query_ids(query_ids.begin(), query_ids.begin() + train_size);
+  std::vector<int> test_query_ids(query_ids.begin() + train_size, query_ids.end());
+
+  const double train_logloss = BinaryLogLoss(train_predictions, train_labels);
+  const double valid_logloss = BinaryLogLoss(test_predictions, test_labels);
+  if (options.verbose) {
+    std::cout << "[OMEGA] final_train_logloss=" << std::fixed << std::setprecision(8)
+              << train_logloss << " final_valid_logloss=" << valid_logloss;
+    if (best_iteration > 0) {
+      std::cout << " best_valid_iteration=" << best_iteration
+                << " best_valid_metric=" << best_valid_metric;
+    }
+    std::cout << std::endl;
+  }
+  WriteMetricsJson(options.output_dir + "/lightgbm_training_metrics.json",
+                   eval_metric_names,
+                   train_eval_history,
+                   valid_eval_history,
+                   best_iteration,
+                   std::isfinite(best_valid_metric) ? best_valid_metric
+                                                    : valid_logloss);
+  WritePredictionTraceCsv(options.output_dir + "/train_predictions.csv",
+                          train_query_ids, train_predictions, train_labels);
+  WritePredictionTraceCsv(options.output_dir + "/valid_predictions.csv",
+                          test_query_ids, test_predictions, test_labels);
+  WriteCalibrationBucketsCsv(options.output_dir + "/train_calibration_buckets.csv",
+                             train_predictions, train_labels, 20,
+                             options.verbose, "train");
+  WriteCalibrationBucketsCsv(options.output_dir + "/valid_calibration_buckets.csv",
+                             test_predictions, test_labels, 20,
+                             options.verbose, "valid");
+
   // Step 7: Generate threshold table
   {
     ScopedTimer timer("GenerateThresholdTable", options.verbose);
     std::string threshold_path = options.output_dir + "/threshold_table.txt";
-    std::vector<float> test_labels(labels.begin() + train_size, labels.end());
     if (GenerateThresholdTable(test_predictions, test_labels, threshold_path) != 0) {
       std::cerr << "[OMEGA] Failed to generate threshold table" << std::endl;
       // Continue anyway

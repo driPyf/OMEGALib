@@ -100,6 +100,7 @@ SearchContext::SearchContext(const GBDTModel* model, const ModelTables* tables,
       next_prediction_cmps_(50),
       last_predicted_recall_avg_(0.0f),
       last_predicted_recall_at_target_(0.0f),
+      last_true_recall_avg_(-1.0f),
       early_stop_hit_(false),
       training_mode_enabled_(false),  // Phase 5: Training mode disabled by default
       current_query_id_(-1),
@@ -148,6 +149,7 @@ void SearchContext::Reset() {
   traversal_window_stats_cache_.clear();  // Clear stats cache
   last_predicted_recall_avg_ = 0.0f;
   last_predicted_recall_at_target_ = 0.0f;
+  last_true_recall_avg_ = -1.0f;
   early_stop_hit_ = false;
   should_stop_calls_ = 0;
   prediction_calls_ = 0;
@@ -521,6 +523,7 @@ bool SearchContext::ShouldStopEarly() {
       if (collected_gt_ >= k_) {
         early_stop_hit_ = true;
         last_predicted_recall_avg_ = 1.0f;
+        last_true_recall_avg_ = ComputeTrueRecallAvg();
         if (collected_gt_advanced_in_call) {
           ++should_stop_calls_with_advance_;
         }
@@ -541,6 +544,7 @@ bool SearchContext::ShouldStopEarly() {
 
       if (predicted_recall_avg >= target_recall_) {
         early_stop_hit_ = true;
+        last_true_recall_avg_ = ComputeTrueRecallAvg();
         ++should_stop_calls_with_advance_;
         max_prediction_calls_per_should_stop_ =
             std::max(max_prediction_calls_per_should_stop_,
@@ -624,6 +628,7 @@ bool SearchContext::ShouldStopEarly() {
   // Stop if we've reached target recall
   if (predicted_recall >= target_recall_) {
     early_stop_hit_ = true;
+    last_true_recall_avg_ = ComputeTrueRecallAvg();
     if (collect_timing_) {
       should_stop_time_ns_ +=
           ProfilingTimer::ElapsedNs(should_stop_start, ProfilingTimer::Now());
@@ -635,6 +640,36 @@ bool SearchContext::ShouldStopEarly() {
         ProfilingTimer::ElapsedNs(should_stop_start, ProfilingTimer::Now());
   }
   return false;
+}
+
+float SearchContext::ComputeTrueRecallAvg() const {
+  if (ground_truth_.empty() || k_ <= 0) {
+    return -1.0f;
+  }
+
+  const auto& sorted = GetSortedTopCandidates();
+  if (sorted.empty()) {
+    return 0.0f;
+  }
+
+  const int actual_k = std::min(
+      k_, static_cast<int>(std::min(sorted.size(), ground_truth_.size())));
+  if (actual_k <= 0) {
+    return 0.0f;
+  }
+
+  int found = 0;
+  for (int rank = 0; rank < actual_k; ++rank) {
+    const int gt_id = ground_truth_[rank];
+    for (int cand = 0; cand < actual_k; ++cand) {
+      if (sorted[cand].id == gt_id) {
+        ++found;
+        break;
+      }
+    }
+  }
+
+  return static_cast<float>(found) / static_cast<float>(actual_k);
 }
 
 std::vector<float> SearchContext::ExtractFeatures() {

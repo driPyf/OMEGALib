@@ -93,6 +93,7 @@ class SearchContext {
   float GetLastPredictedRecallAtTarget() const {
     return last_predicted_recall_at_target_;
   }
+  float GetLastTrueRecallAvg() const { return last_true_recall_avg_; }
   bool EarlyStopHit() const { return early_stop_hit_; }
   uint64_t GetShouldStopCalls() const { return should_stop_calls_; }
   uint64_t GetPredictionCalls() const { return prediction_calls_; }
@@ -180,6 +181,7 @@ class SearchContext {
   int next_prediction_cmps_;  // When to predict next
   float last_predicted_recall_avg_;
   float last_predicted_recall_at_target_;
+  float last_true_recall_avg_;
   bool early_stop_hit_;
 
   // Weighted BH state (Phase 4)
@@ -262,6 +264,7 @@ class SearchContext {
 
   // Query gt_cmps_all_table (Phase 4)
   float GetRecallFromGtCmpsAllTable(int rank, int cmps);
+  float ComputeTrueRecallAvg() const;
 
   // Scratch buffers reused on the hot prediction path to reduce allocations.
   std::vector<std::pair<int, float>> sorted_window_scratch_;
