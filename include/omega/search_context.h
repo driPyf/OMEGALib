@@ -45,6 +45,12 @@ struct TrainingRecord {
 // This is a stateful interface - zvec reports each node visit.
 class SearchContext {
  public:
+  struct VisitCandidate {
+    int id;
+    float distance;
+    bool inserted_to_topk;
+  };
+
   struct TopCandidate {
     int id;
     float distance;
@@ -65,6 +71,7 @@ class SearchContext {
   // Returns: true if we've reached a prediction point and have enough
   // candidates, false otherwise.
   bool ReportVisitCandidate(int node_id, float distance, bool inserted_to_topk);
+  bool ReportVisitCandidates(const VisitCandidate* candidates, size_t count);
 
   // Report a hop during search
   void ReportHop();
@@ -129,6 +136,10 @@ class SearchContext {
   // If GT[rank] was never found, returns total_cmps (the final cmps count)
   const std::vector<int>& GetGtCmpsPerRank() const { return gt_cmps_per_rank_; }
   int GetTotalCmps() const { return comparisons_; }
+  int GetNextPredictionCmps() const { return next_prediction_cmps_; }
+  int GetTopCandidateCountForHook() const { return TopCandidateCount(); }
+  int GetK() const { return k_; }
+  int GetPredictionBatchMinInterval() const;
 
  private:
   const GBDTModel* model_;
@@ -211,6 +222,7 @@ class SearchContext {
 
   // Maintain the current top-k candidates like the reference implementation.
   bool UpdateTopCandidates(int node_id, float distance, int cmps);
+  bool ProcessVisitCandidate(const VisitCandidate& candidate);
   static bool TopCandidateLess(const TopCandidate& lhs,
                                const TopCandidate& rhs);
   const std::vector<TopCandidate>& GetSortedTopCandidates() const;
@@ -243,7 +255,7 @@ class SearchContext {
       int idx, const std::vector<std::pair<int, float>>& sorted_window);
 
   // Get prediction interval from interval_table
-  std::pair<int, int> GetPredictionInterval(float target_recall);
+  std::pair<int, int> GetPredictionInterval(float target_recall) const;
 
   // Query gt_collected_table (Phase 4)
   float GetRecallFromGtCollectedTable(int collected, int rank);

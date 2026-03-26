@@ -258,12 +258,32 @@ void SearchContext::CopyTraversalWindowTo(
 
 bool SearchContext::ReportVisitCandidate(int node_id, float distance,
                                          bool inserted_to_topk) {
+  const VisitCandidate candidate{node_id, distance, inserted_to_topk};
+  return ReportVisitCandidates(&candidate, 1);
+}
+
+bool SearchContext::ReportVisitCandidates(const VisitCandidate* candidates,
+                                          size_t count) {
   ProfilingTimer::tick_t func_start = 0;
   if (collect_timing_) {
     func_start = ProfilingTimer::Now();
   }
 
-  comparisons_++;
+  bool should_predict = false;
+  for (size_t i = 0; i < count; ++i) {
+    should_predict = ProcessVisitCandidate(candidates[i]);
+  }
+
+  if (collect_timing_) {
+    report_visit_candidate_time_ns_ +=
+        ProfilingTimer::ElapsedNs(func_start, ProfilingTimer::Now());
+  }
+
+  return should_predict;
+}
+
+bool SearchContext::ProcessVisitCandidate(const VisitCandidate& candidate) {
+  ++comparisons_;
 
   // Only track traversal window when close to next prediction point
   if (ShouldTrackTraversalWindow()) {
@@ -271,30 +291,30 @@ bool SearchContext::ReportVisitCandidate(int node_id, float distance,
     if (collect_timing_) {
       push_start = ProfilingTimer::Now();
     }
-    PushTraversalWindow(node_id, distance);
+    PushTraversalWindow(candidate.id, candidate.distance);
     if (collect_timing_) {
       push_traversal_window_time_ns_ +=
           ProfilingTimer::ElapsedNs(push_start, ProfilingTimer::Now());
     }
   }
 
-  if (inserted_to_topk) {
+  if (candidate.inserted_to_topk) {
     ProfilingTimer::tick_t update_start = 0;
     if (collect_timing_) {
       update_start = ProfilingTimer::Now();
     }
-    UpdateTopCandidates(node_id, distance, comparisons_);
+    UpdateTopCandidates(candidate.id, candidate.distance, comparisons_);
     if (collect_timing_) {
       update_top_candidates_time_ns_ +=
           ProfilingTimer::ElapsedNs(update_start, ProfilingTimer::Now());
     }
 
     if (training_mode_enabled_ && !ground_truth_.empty() &&
-        gt_found_set_.find(node_id) == gt_found_set_.end()) {
+        gt_found_set_.find(candidate.id) == gt_found_set_.end()) {
       for (size_t rank = 0; rank < ground_truth_.size(); ++rank) {
-        if (ground_truth_[rank] == node_id) {
+        if (ground_truth_[rank] == candidate.id) {
           gt_cmps_per_rank_[rank] = comparisons_;
-          gt_found_set_.insert(node_id);
+          gt_found_set_.insert(candidate.id);
           break;
         }
       }
@@ -330,11 +350,6 @@ bool SearchContext::ReportVisitCandidate(int node_id, float distance,
     }
 
     training_records_.push_back(record);
-  }
-
-  if (collect_timing_) {
-    report_visit_candidate_time_ns_ +=
-        ProfilingTimer::ElapsedNs(func_start, ProfilingTimer::Now());
   }
 
   // Fused ShouldPredict logic: return true if we should predict
@@ -385,6 +400,17 @@ void SearchContext::GetStats(int* hops, int* comparisons, int* collected_gt) con
   if (hops) *hops = hops_;
   if (comparisons) *comparisons = comparisons_;
   if (collected_gt) *collected_gt = collected_gt_;
+}
+
+int SearchContext::GetPredictionBatchMinInterval() const {
+  int min_interval = GetPredictionInterval(target_recall_).second;
+  if (use_weighted_bh_ && !min_intervals_.empty()) {
+    auto it = std::min_element(min_intervals_.begin(), min_intervals_.end());
+    if (it != min_intervals_.end()) {
+      min_interval = std::min(min_interval, *it);
+    }
+  }
+  return std::max(1, min_interval);
 }
 
 bool SearchContext::ShouldStopEarly() {
@@ -781,7 +807,7 @@ float SearchContext::PredictWithFeatureArray(
   return it->second;
 }
 
-std::pair<int, int> SearchContext::GetPredictionInterval(float target_recall) {
+std::pair<int, int> SearchContext::GetPredictionInterval(float target_recall) const {
   if (!tables_ || tables_->interval_table.empty()) {
     return {50, 10};  // Default: initial_interval=50, min_interval=10
   }
