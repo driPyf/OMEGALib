@@ -905,8 +905,10 @@ int OmegaTrainer::TrainModel(
 
   std::vector<float> train_labels(labels.begin(), labels.begin() + train_size);
   std::vector<float> test_labels(labels.begin() + train_size, labels.end());
-  std::vector<int> train_query_ids(query_ids.begin(), query_ids.begin() + train_size);
-  std::vector<int> test_query_ids(query_ids.begin() + train_size, query_ids.end());
+  std::vector<int> train_record_query_ids(
+      query_ids.begin(), query_ids.begin() + train_size);
+  std::vector<int> test_record_query_ids(
+      query_ids.begin() + train_size, query_ids.end());
 
   const double train_logloss = BinaryLogLoss(train_predictions, train_labels);
   const double valid_logloss = BinaryLogLoss(test_predictions, test_labels);
@@ -927,9 +929,9 @@ int OmegaTrainer::TrainModel(
                    std::isfinite(best_valid_metric) ? best_valid_metric
                                                     : valid_logloss);
   WritePredictionTraceCsv(options.output_dir + "/train_predictions.csv",
-                          train_query_ids, train_predictions, train_labels);
+                          train_record_query_ids, train_predictions, train_labels);
   WritePredictionTraceCsv(options.output_dir + "/valid_predictions.csv",
-                          test_query_ids, test_predictions, test_labels);
+                          test_record_query_ids, test_predictions, test_labels);
   WriteCalibrationBucketsCsv(options.output_dir + "/train_calibration_buckets.csv",
                              train_predictions, train_labels, 20,
                              options.verbose, "train");
