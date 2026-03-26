@@ -92,9 +92,6 @@ class ModelManager {
   // Check if model is successfully loaded
   bool IsLoaded() const { return model_loaded_; }
 
-  // Get the directory from which the model was loaded
-  const std::string& GetModelDir() const { return model_dir_; }
-
  private:
   std::unique_ptr<GBDTModel> model_;
   std::unique_ptr<ModelTables> tables_;

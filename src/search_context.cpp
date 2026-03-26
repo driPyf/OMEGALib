@@ -114,7 +114,6 @@ SearchContext::SearchContext(const GBDTModel* model, const ModelTables* tables,
       average_recall_eval_time_ns_(0),
       prediction_feature_prep_time_ns_(0),
       report_visit_candidate_time_ns_(0),
-      should_predict_time_ns_(0),
       report_hop_time_ns_(0),
       update_top_candidates_time_ns_(0),
       push_traversal_window_time_ns_(0),
@@ -161,7 +160,6 @@ void SearchContext::Reset() {
   average_recall_eval_time_ns_ = 0;
   prediction_feature_prep_time_ns_ = 0;
   report_visit_candidate_time_ns_ = 0;
-  should_predict_time_ns_ = 0;
   report_hop_time_ns_ = 0;
   update_top_candidates_time_ns_ = 0;
   push_traversal_window_time_ns_ = 0;
@@ -255,73 +253,6 @@ void SearchContext::CopyTraversalWindowTo(
   for (int i = 0; i < traversal_window_size_; ++i) {
     int idx = (traversal_window_head_ + i) % window_size_;
     out->push_back(traversal_window_buffer_[idx]);
-  }
-}
-
-void SearchContext::ReportVisit(int node_id, float distance, bool is_in_topk) {
-  comparisons_++;
-
-  PushTraversalWindow(node_id, distance);
-
-  // Update topk tracking
-  if (is_in_topk) {
-    UpdateTopCandidates(node_id, distance, comparisons_);
-
-    // Track gt_cmps for each GT rank when the GT node first enters topk
-    if (training_mode_enabled_ && !ground_truth_.empty()) {
-      // Check if this node is a GT node and hasn't been found yet
-      if (gt_found_set_.find(node_id) == gt_found_set_.end()) {
-        // Check which GT rank(s) this node corresponds to
-        for (size_t rank = 0; rank < ground_truth_.size(); ++rank) {
-          if (ground_truth_[rank] == node_id) {
-            // Record the cmps when this GT rank was found
-            gt_cmps_per_rank_[rank] = comparisons_;
-            gt_found_set_.insert(node_id);
-            break;  // Each node_id can only match one GT rank
-          }
-        }
-      }
-    }
-  }
-
-  // Phase 5: Collect training features if training mode is enabled
-  // MEMORY OPTIMIZED: Compute label in real-time instead of storing collected_node_ids
-  // This reduces memory from O(records * ef) to O(records * 11_features)
-  if (training_mode_enabled_) {
-    TrainingRecord record;
-    record.query_id = current_query_id_;
-    record.hops = hops_;
-    record.cmps = comparisons_;
-    record.dist_1st = dist_1st_;
-    record.dist_start = dist_start_;
-
-    // Use cached stats (computed in ReportHop) - O(1) copy
-    // If cache is empty (before first hop), use default zeros
-    if (traversal_window_stats_cache_.size() == 7) {
-      record.traversal_window_stats = traversal_window_stats_cache_;
-    } else {
-      record.traversal_window_stats = std::vector<float>(7, 0.0f);
-    }
-
-    // Match the reference generate_training_data.py semantics:
-    // label becomes 1 once the first k_train ground-truth items have all been
-    // collected at least once by the current comparison count. This is
-    // monotonic in cmps and does not require the GT items to remain in top-k.
-    record.label = 0;
-    if (!ground_truth_.empty()) {
-      size_t actual_k = std::min(static_cast<size_t>(k_train_), ground_truth_.size());
-      bool all_found = true;
-      for (size_t i = 0; i < actual_k && all_found; ++i) {
-        if (i >= gt_cmps_per_rank_.size() ||
-            gt_cmps_per_rank_[i] < 0 ||
-            comparisons_ < gt_cmps_per_rank_[i]) {
-          all_found = false;
-        }
-      }
-      record.label = all_found ? 1 : 0;
-    }
-
-    training_records_.push_back(record);
   }
 }
 
@@ -432,22 +363,6 @@ void SearchContext::ReportHop() {
     report_hop_time_ns_ +=
         ProfilingTimer::ElapsedNs(func_start, ProfilingTimer::Now());
   }
-}
-
-bool SearchContext::ShouldPredict() const {
-  ProfilingTimer::tick_t func_start = 0;
-  if (collect_timing_) {
-    func_start = ProfilingTimer::Now();
-  }
-
-  // Check if we have enough results and reached prediction point
-  bool result = comparisons_ >= next_prediction_cmps_ && TopCandidateCount() >= k_;
-
-  if (collect_timing_) {
-    should_predict_time_ns_ +=
-        ProfilingTimer::ElapsedNs(func_start, ProfilingTimer::Now());
-  }
-  return result;
 }
 
 bool SearchContext::ShouldTrackTraversalWindow() const {
@@ -1064,15 +979,6 @@ void SearchContext::EnableTrainingMode(int query_id, const std::vector<int>& gro
 
   // Initialize gt_cmps_per_rank with -1 (will be set to total_cmps at end if not found)
   gt_cmps_per_rank_.assign(ground_truth.size(), -1);
-  gt_found_set_.clear();
-}
-
-// Phase 5: Disable training mode
-void SearchContext::DisableTrainingMode() {
-  training_mode_enabled_ = false;
-  current_query_id_ = -1;
-  ground_truth_.clear();
-  gt_cmps_per_rank_.clear();
   gt_found_set_.clear();
 }
 

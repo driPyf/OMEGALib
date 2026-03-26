@@ -60,14 +60,10 @@ class SearchContext {
   // Reset the search state for a new query
   void Reset();
 
-  // Report a node visit during search
-  void ReportVisit(int node_id, float distance, bool is_in_topk);
-
   // Report a node visit and let SearchContext maintain the result-set-sized
   // top-k structure directly.
-  // Returns: true if we should predict (i.e., reached prediction point and have
-  // enough candidates), false otherwise. This fuses ShouldPredict() logic to
-  // avoid an extra per-comparison function call.
+  // Returns: true if we've reached a prediction point and have enough
+  // candidates, false otherwise.
   bool ReportVisitCandidate(int node_id, float distance, bool inserted_to_topk);
 
   // Report a hop during search
@@ -75,10 +71,6 @@ class SearchContext {
 
   // Set the distance to the start node (called once at search start)
   void SetDistStart(float dist_start) { dist_start_ = dist_start; }
-
-  // Check if should perform prediction now
-  // Based on interval_table and current comparison count
-  bool ShouldPredict() const;
 
   // Check if should track traversal window
   // Only track when close to next prediction point
@@ -109,7 +101,6 @@ class SearchContext {
   uint64_t GetReportVisitCandidateTimeNs() const {
     return report_visit_candidate_time_ns_;
   }
-  uint64_t GetShouldPredictTimeNs() const { return should_predict_time_ns_; }
   uint64_t GetReportHopTimeNs() const { return report_hop_time_ns_; }
   uint64_t GetUpdateTopCandidatesTimeNs() const {
     return update_top_candidates_time_ns_;
@@ -131,7 +122,6 @@ class SearchContext {
   // ground_truth: top-k ground truth node IDs for this query (used to compute labels in real-time)
   // k_train: number of ground truth nodes to check (default 1)
   void EnableTrainingMode(int query_id, const std::vector<int>& ground_truth, int k_train = 1);
-  void DisableTrainingMode();
   const std::vector<TrainingRecord>& GetTrainingRecords() const { return training_records_; }
 
   // Get gt_cmps data: cmps value when each GT rank was first found in topk
@@ -208,7 +198,6 @@ class SearchContext {
   uint64_t average_recall_eval_time_ns_;
   uint64_t prediction_feature_prep_time_ns_;
   uint64_t report_visit_candidate_time_ns_;
-  mutable uint64_t should_predict_time_ns_;
   uint64_t report_hop_time_ns_;
   uint64_t update_top_candidates_time_ns_;
   uint64_t push_traversal_window_time_ns_;
