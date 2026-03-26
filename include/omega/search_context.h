@@ -64,8 +64,10 @@ class SearchContext {
   void ReportVisit(int node_id, float distance, bool is_in_topk);
 
   // Report a node visit and let SearchContext maintain the result-set-sized
-  // top-k structure directly. Returns whether the node was inserted into the
-  // current top-k result set.
+  // top-k structure directly.
+  // Returns: true if we should predict (i.e., reached prediction point and have
+  // enough candidates), false otherwise. This fuses ShouldPredict() logic to
+  // avoid an extra per-comparison function call.
   bool ReportVisitCandidate(int node_id, float distance, bool inserted_to_topk);
 
   // Report a hop during search

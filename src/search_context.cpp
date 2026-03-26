@@ -405,7 +405,9 @@ bool SearchContext::ReportVisitCandidate(int node_id, float distance,
     report_visit_candidate_time_ns_ +=
         ProfilingTimer::ElapsedNs(func_start, ProfilingTimer::Now());
   }
-  return inserted_to_topk;
+
+  // Fused ShouldPredict logic: return true if we should predict
+  return comparisons_ >= next_prediction_cmps_ && TopCandidateCount() >= k_;
 }
 
 void SearchContext::ReportHop() {
