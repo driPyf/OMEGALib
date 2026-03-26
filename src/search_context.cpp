@@ -18,7 +18,6 @@
 #include <array>
 #include <cmath>
 #include <limits>
-#include <mutex>
 #include <unordered_map>
 #include <utility>
 
@@ -43,20 +42,18 @@ struct WeightedBhCacheKeyHash {
 };
 
 const std::vector<float>& GetWeightedBhRatios(int k, int k_train) {
-  static std::mutex cache_mutex;
-  static std::unordered_map<WeightedBhCacheKey, std::vector<float>,
-                            WeightedBhCacheKeyHash>
+  thread_local std::unordered_map<WeightedBhCacheKey, std::vector<float>,
+                                  WeightedBhCacheKeyHash>
       ratios_cache;
 
   const WeightedBhCacheKey key{k, k_train};
-  std::lock_guard<std::mutex> lock(cache_mutex);
   auto it = ratios_cache.find(key);
   if (it != ratios_cache.end()) {
     return it->second;
   }
 
-  auto [inserted_it, _] = ratios_cache.emplace(key, std::vector<float>(k, 0.0f));
-  auto& ratios = inserted_it->second;
+  auto inserted = ratios_cache.emplace(key, std::vector<float>(k, 0.0f));
+  auto& ratios = inserted.first->second;
   if (k <= 0 || k_train <= 0) {
     return ratios;
   }
