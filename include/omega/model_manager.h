@@ -50,12 +50,12 @@ struct ModelTables {
   // Format: multiplier_table[int(recall * 100)] = multiplier
   std::unordered_map<int, float> multiplier_table;
 
-  // Ground truth collection statistics (Phase 4)
+  // Ground-truth collection statistics used for recall lookup tables.
   // 2D table: gt_collected_table[collected][rank] = recall
   // Format in file: "row_index:val1,val2,...,valK\n"
   std::map<int, std::vector<float>> gt_collected_table;
 
-  // Ground truth comparison statistics (Phase 4)
+  // Ground-truth comparison statistics used for recall lookup tables.
   // 2D table: gt_cmps_all_table[rank][percentile] = cmps_value
   // Format in file: "row_index:val1,val2,...,val100\n"
   // Contains 100 percentiles (1%, 2%, ..., 100%) for each rank

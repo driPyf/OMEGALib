@@ -87,8 +87,8 @@ SearchContext::SearchContext(const GBDTModel* model, const ModelTables* tables,
       target_recall_(target_recall),
       k_(k),
       window_size_(window_size),
-      k_train_(1),  // Phase 4: K value for training
-      use_weighted_bh_(true),  // Phase 4: Enable Weighted BH by default
+      k_train_(1),  // Number of GT ranks required for a positive training label.
+      use_weighted_bh_(true),  // Enable Weighted BH rank-wise target allocation by default.
       top_candidates_sorted_cache_valid_(true),
       traversal_window_head_(0),
       traversal_window_size_(0),
@@ -101,7 +101,7 @@ SearchContext::SearchContext(const GBDTModel* model, const ModelTables* tables,
       last_predicted_recall_avg_(0.0f),
       last_predicted_recall_at_target_(0.0f),
       early_stop_hit_(false),
-      training_mode_enabled_(false),  // Phase 5: Training mode disabled by default
+      training_mode_enabled_(false),  // Training mode is disabled by default.
       current_query_id_(-1),
       should_stop_calls_(0),
       prediction_calls_(0),
@@ -117,7 +117,7 @@ SearchContext::SearchContext(const GBDTModel* model, const ModelTables* tables,
       collected_gt_advance_count_(0),
       should_stop_calls_with_advance_(0),
       max_prediction_calls_per_should_stop_(0),
-      collect_timing_(IsControlTimingEnabled()) {  // Phase 5: No query ID initially
+      collect_timing_(IsControlTimingEnabled()) {  // No training query is attached initially.
   traversal_window_buffer_.resize(window_size_ > 0 ? window_size_ : 0);
   top_candidates_.reserve(k_ > 0 ? k_ : 0);
   sorted_window_scratch_.reserve(window_size_ > 0 ? window_size_ : 0);
@@ -128,7 +128,7 @@ SearchContext::SearchContext(const GBDTModel* model, const ModelTables* tables,
   auto interval = GetPredictionInterval(target_recall);
   next_prediction_cmps_ = interval.first;  // initial_interval
 
-  // Phase 4: Initialize Weighted BH method
+  // Initialize rank-wise recall targets and prediction intervals.
   InitializeWeightedBH();
 }
 
@@ -168,7 +168,7 @@ void SearchContext::Reset() {
   auto interval = GetPredictionInterval(target_recall_);
   next_prediction_cmps_ = interval.first;
 
-  // Phase 4: Re-initialize Weighted BH for new query
+  // Reinitialize rank-wise recall targets for the new query.
   InitializeWeightedBH();
 }
 
@@ -361,7 +361,8 @@ void SearchContext::ReportHop() {
 
   hops_++;
 
-  // Phase 5: Compute traversal window stats cache for training mode
+  // In training mode, compute traversal-window stats once per hop and reuse
+  // them across visit records from the same hop.
   // This is called ONCE per hop, before processing all neighbors
   // The cached stats are then reused in ReportVisit() for each neighbor
   // Matches original OMEGA design: O(window_size * log(window_size)) per hop
@@ -447,7 +448,7 @@ bool SearchContext::ShouldStopEarly() {
     return false;  // No model, can't make decision
   }
 
-  // Phase 4: collected_gt iteration with per-K prediction
+  // Advance rank-wise predictions using the current collected_gt frontier.
   if (use_weighted_bh_ && TopCandidateCount() >= k_) {
     CopyTraversalWindowTo(&sorted_window_scratch_);
     std::sort(sorted_window_scratch_.begin(), sorted_window_scratch_.end(),
@@ -825,7 +826,7 @@ std::pair<int, int> SearchContext::GetPredictionInterval(float target_recall) co
   return {50, 10};
 }
 
-// Phase 4: Initialize Weighted BH method
+// Initialize Weighted BH rank-wise recall targets and intervals.
 // OMEGA's rank-wise prediction loop effectively turns one top-k stopping
 // decision into k masked top-1 confirmation problems. A false positive at an
 // early rank contaminates all later masked ranks, so the per-rank prediction
@@ -853,7 +854,7 @@ void SearchContext::InitializeWeightedBH() {
   }
 }
 
-// Phase 4: Extract features for specific rank (per-K prediction)
+// Extract features for a specific masked rank prediction.
 std::vector<float> SearchContext::ExtractFeaturesForRank(int idx) {
   const auto& top_candidates = GetSortedTopCandidates();
   if (idx < 0 || idx >= static_cast<int>(top_candidates.size())) {
@@ -885,7 +886,7 @@ std::vector<float> SearchContext::ExtractFeaturesForRank(int idx) {
   return features;
 }
 
-// Phase 4: Predict recall for specific rank
+// Predict recall for a specific masked rank.
 float SearchContext::PredictRecallForRank(int idx) {
   if (!model_ || idx < 0 || idx >= TopCandidateCount()) {
     return 0.0f;
@@ -931,7 +932,7 @@ float SearchContext::PredictRecallForRankWithSortedWindow(
   return PredictWithFeatureArray(features);
 }
 
-// Phase 4: Query gt_collected_table
+// Query gt_collected_table.
 float SearchContext::GetRecallFromGtCollectedTable(int collected, int rank) {
   if (!tables_ || tables_->gt_collected_table.empty()) {
     return 0.0f;
@@ -959,7 +960,7 @@ float SearchContext::GetRecallFromGtCollectedTable(int collected, int rank) {
   return row[rank_idx];
 }
 
-// Phase 4: Query gt_cmps_all_table
+// Query gt_cmps_all_table.
 float SearchContext::GetRecallFromGtCmpsAllTable(int rank, int cmps) {
   if (!tables_ || tables_->gt_cmps_all_table.empty()) {
     return 0.0f;
@@ -986,7 +987,7 @@ float SearchContext::GetRecallFromGtCmpsAllTable(int rank, int cmps) {
   return static_cast<float>(percentile_idx) / 100.0f;
 }
 
-// Phase 5: Enable training mode with ground truth for real-time label computation
+// Enable training mode with per-query ground truth for real-time labels.
 void SearchContext::EnableTrainingMode(int query_id, const std::vector<int>& ground_truth, int k_train) {
   training_mode_enabled_ = true;
   current_query_id_ = query_id;

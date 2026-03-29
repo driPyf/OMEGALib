@@ -122,7 +122,7 @@ void omega_search_destroy(OmegaSearchHandle handle) {
   }
 }
 
-// Phase 5: Training mode functions
+// Training-mode functions
 
 void omega_search_enable_training(OmegaSearchHandle handle, int query_id,
                                    const int* ground_truth, size_t gt_count, int k_train) {

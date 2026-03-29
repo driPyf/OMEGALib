@@ -125,7 +125,7 @@ class SearchContext {
     return max_prediction_calls_per_should_stop_;
   }
 
-  // Training mode methods (Phase 5)
+  // Training-mode methods
   // ground_truth: top-k ground truth node IDs for this query (used to compute labels in real-time)
   // k_train: number of ground truth nodes to check (default 1)
   void EnableTrainingMode(int query_id, const std::vector<int>& ground_truth, int k_train = 1);
@@ -182,7 +182,7 @@ class SearchContext {
   float last_predicted_recall_at_target_;
   bool early_stop_hit_;
 
-  // Weighted BH state (Phase 4)
+  // Weighted BH state
   // These arrays hold the per-rank targets/intervals derived from the global
   // target recall. They let SearchContext confirm ranks incrementally while
   // accounting for the fact that OMEGA decomposes top-k into multiple masked
@@ -191,7 +191,7 @@ class SearchContext {
   std::vector<int> initial_intervals_;  // Initial prediction interval for each rank
   std::vector<int> min_intervals_;  // Minimum prediction interval for each rank
 
-  // Training mode state (Phase 5)
+  // Training-mode state
   bool training_mode_enabled_;
   int current_query_id_;
   std::vector<TrainingRecord> training_records_;
@@ -217,7 +217,7 @@ class SearchContext {
   uint64_t max_prediction_calls_per_should_stop_;
   mutable bool collect_timing_;
 
-  // Initialize Weighted BH method (Phase 4)
+  // Initialize Weighted BH rank-wise target allocation.
   void InitializeWeightedBH();
 
   // Maintain the current top-k candidates like the reference implementation.
@@ -233,7 +233,7 @@ class SearchContext {
   // Extract 11-dimensional features from current state
   std::vector<float> ExtractFeatures();
 
-  // Extract 11-dimensional features for specific rank (Phase 4)
+  // Extract 11-dimensional features for a specific masked rank.
   std::vector<float> ExtractFeaturesForRank(int idx);
 
   // Extract 7-dimensional traversal window statistics
@@ -249,7 +249,7 @@ class SearchContext {
   float PredictWithFeatures(const std::vector<float>& features);
   float PredictWithFeatureArray(const std::array<float, 11>& features);
 
-  // Predict recall for specific rank (Phase 4)
+  // Predict recall for a specific masked rank.
   float PredictRecallForRank(int idx);
   float PredictRecallForRankWithSortedWindow(
       int idx, const std::vector<std::pair<int, float>>& sorted_window);
@@ -257,10 +257,10 @@ class SearchContext {
   // Get prediction interval from interval_table
   std::pair<int, int> GetPredictionInterval(float target_recall) const;
 
-  // Query gt_collected_table (Phase 4)
+  // Query gt_collected_table.
   float GetRecallFromGtCollectedTable(int collected, int rank);
 
-  // Query gt_cmps_all_table (Phase 4)
+  // Query gt_cmps_all_table.
   float GetRecallFromGtCmpsAllTable(int rank, int cmps);
 
   // Scratch buffers reused on the hot prediction path to reduce allocations.

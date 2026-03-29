@@ -71,7 +71,7 @@ OmegaSearchHandle omega_search_create_with_params(OmegaModelHandle model,
 //   handle: Search context handle
 void omega_search_destroy(OmegaSearchHandle handle);
 
-// Training mode functions (Phase 5)
+// Training-mode functions
 
 // Enable training mode for collecting features with ground truth for real-time label computation
 // Parameters:
