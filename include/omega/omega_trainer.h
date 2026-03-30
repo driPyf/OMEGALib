@@ -14,26 +14,13 @@
 
 #pragma once
 
+#include "omega/search_context.h"
 #include <string>
 #include <vector>
 #include <cstdint>
 #include <utility>
 
 namespace omega {
-
-/**
- * @brief Training record for OMEGA model
- * Memory-optimized: labels are computed in real-time, no need to store collected_node_ids
- */
-struct TrainingRecord {
-  int query_id = 0;
-  int hops_visited = 0;
-  int cmps_visited = 0;
-  float dist_1st = 0.0f;
-  float dist_start = 0.0f;
-  std::vector<float> traversal_window_stats;  // 7 dimensions
-  int label = 0;  // Computed in real-time during search
-};
 
 /**
  * @brief Ground truth cmps data for table generation

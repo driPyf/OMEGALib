@@ -90,13 +90,12 @@ class ModelManager {
   const ModelTables* GetTables() const { return tables_.get(); }
 
   // Check if model is successfully loaded
-  bool IsLoaded() const { return model_loaded_; }
+ bool IsLoaded() const { return model_loaded_; }
 
  private:
   std::unique_ptr<GBDTModel> model_;
   std::unique_ptr<ModelTables> tables_;
   bool model_loaded_;
-  std::string model_dir_;
 
   // Load individual table files
   bool LoadThresholdTable(const std::string& path);
@@ -104,12 +103,6 @@ class ModelManager {
   bool LoadMultiplierTable(const std::string& path);
   bool LoadGTCollectedTable(const std::string& path);
   bool LoadGTCmpsAllTable(const std::string& path);
-
-  // Helper to parse a line with format "key,value"
-  bool ParseKeyValue(const std::string& line, int* key, float* value);
-  bool ParseKeyValue(const std::string& line, int* key, int* value);
-  bool ParseKeyValuePair(const std::string& line, int* key,
-                        int* value1, int* value2);
 
   // Helper to parse 2D table line with format "row_index:val1,val2,...,valN"
   bool Parse2DTableLine(const std::string& line, int* row_index,

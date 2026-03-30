@@ -17,10 +17,7 @@
 
 #include "omega/tree_inference.h"
 #include "omega/model_manager.h"
-#include "omega/feature_extractor.h"
-#include <limits>
 #include <array>
-#include <functional>
 #include <vector>
 #include <unordered_set>
 #include <cstdint>
@@ -31,8 +28,8 @@ namespace omega {
 // Memory-optimized: labels are computed in real-time, no need to store collected_node_ids
 struct TrainingRecord {
   int query_id;
-  int hops;
-  int cmps;
+  int hops_visited;
+  int cmps_visited;
   float dist_1st;
   float dist_start;
   std::vector<float> traversal_window_stats;  // 7 dimensions
@@ -233,9 +230,6 @@ class SearchContext {
   // Extract 11-dimensional features from current state
   std::vector<float> ExtractFeatures();
 
-  // Extract 11-dimensional features for a specific masked rank.
-  std::vector<float> ExtractFeaturesForRank(int idx);
-
   // Extract 7-dimensional traversal window statistics
   std::vector<float> GetTraversalWindowStats(const std::vector<int>& masked_ids);
   std::array<float, 7> GetTraversalWindowStatsArrayFromSortedWindow(
@@ -249,8 +243,6 @@ class SearchContext {
   float PredictWithFeatures(const std::vector<float>& features);
   float PredictWithFeatureArray(const std::array<float, 11>& features);
 
-  // Predict recall for a specific masked rank.
-  float PredictRecallForRank(int idx);
   float PredictRecallForRankWithSortedWindow(
       int idx, const std::vector<std::pair<int, float>>& sorted_window);
 

@@ -321,8 +321,8 @@ bool SearchContext::ProcessVisitCandidate(const VisitCandidate& candidate) {
   if (training_mode_enabled_) {
     TrainingRecord record;
     record.query_id = current_query_id_;
-    record.hops = hops_;
-    record.cmps = comparisons_;
+    record.hops_visited = hops_;
+    record.cmps_visited = comparisons_;
     record.dist_1st = dist_1st_;
     record.dist_start = dist_start_;
 
@@ -852,51 +852,6 @@ void SearchContext::InitializeWeightedBH() {
       min_intervals_[i] = interval.second;
     }
   }
-}
-
-// Extract features for a specific masked rank prediction.
-std::vector<float> SearchContext::ExtractFeaturesForRank(int idx) {
-  const auto& top_candidates = GetSortedTopCandidates();
-  if (idx < 0 || idx >= static_cast<int>(top_candidates.size())) {
-    return std::vector<float>();
-  }
-
-  std::vector<float> features(11);
-  features[0] = static_cast<float>(hops_);
-  features[1] = static_cast<float>(comparisons_ - idx);
-  features[2] = top_candidates[idx].distance;
-  features[3] = dist_start_;
-
-  // Compute masked_ids: all candidates before idx
-  std::vector<int> masked_ids;
-  for (int prev_idx = 0;
-       prev_idx + k_train_ - 1 < idx &&
-       prev_idx < static_cast<int>(top_candidates.size());
-       ++prev_idx) {
-    if (comparisons_ - top_candidates[prev_idx].cmps <= window_size_) {
-      masked_ids.push_back(top_candidates[prev_idx].id);
-    }
-  }
-  std::sort(masked_ids.begin(), masked_ids.end());
-
-  std::vector<float> window_stats = GetTraversalWindowStats(masked_ids);
-  for (size_t i = 0; i < 7; ++i) {
-    features[4 + i] = window_stats[i];
-  }
-  return features;
-}
-
-// Predict recall for a specific masked rank.
-float SearchContext::PredictRecallForRank(int idx) {
-  if (!model_ || idx < 0 || idx >= TopCandidateCount()) {
-    return 0.0f;
-  }
-
-  CopyTraversalWindowTo(&sorted_window_scratch_);
-  std::sort(sorted_window_scratch_.begin(), sorted_window_scratch_.end(),
-            [](const auto& a, const auto& b) { return a.second < b.second; });
-
-  return PredictRecallForRankWithSortedWindow(idx, sorted_window_scratch_);
 }
 
 float SearchContext::PredictRecallForRankWithSortedWindow(

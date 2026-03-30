@@ -25,7 +25,6 @@ ModelManager::ModelManager()
 ModelManager::~ModelManager() = default;
 
 bool ModelManager::LoadModel(const std::string& model_dir) {
-  model_dir_ = model_dir;
   model_loaded_ = false;
 
   // Create new model and tables
@@ -209,73 +208,6 @@ bool ModelManager::LoadGTCmpsAllTable(const std::string& path) {
   }
 
   return true;
-}
-
-bool ModelManager::ParseKeyValue(const std::string& line,
-                                 int* key, float* value) {
-  std::istringstream iss(line);
-  std::string key_str, value_str;
-
-  if (!std::getline(iss, key_str, ',')) {
-    return false;
-  }
-  if (!std::getline(iss, value_str)) {
-    return false;
-  }
-
-  try {
-    *key = std::stoi(key_str);
-    *value = std::stof(value_str);
-    return true;
-  } catch (...) {
-    return false;
-  }
-}
-
-bool ModelManager::ParseKeyValue(const std::string& line,
-                                 int* key, int* value) {
-  std::istringstream iss(line);
-  std::string key_str, value_str;
-
-  if (!std::getline(iss, key_str, ',')) {
-    return false;
-  }
-  if (!std::getline(iss, value_str)) {
-    return false;
-  }
-
-  try {
-    *key = std::stoi(key_str);
-    *value = std::stoi(value_str);
-    return true;
-  } catch (...) {
-    return false;
-  }
-}
-
-bool ModelManager::ParseKeyValuePair(const std::string& line, int* key,
-                                    int* value1, int* value2) {
-  std::istringstream iss(line);
-  std::string key_str, value1_str, value2_str;
-
-  if (!std::getline(iss, key_str, ',')) {
-    return false;
-  }
-  if (!std::getline(iss, value1_str, ',')) {
-    return false;
-  }
-  if (!std::getline(iss, value2_str)) {
-    return false;
-  }
-
-  try {
-    *key = std::stoi(key_str);
-    *value1 = std::stoi(value1_str);
-    *value2 = std::stoi(value2_str);
-    return true;
-  } catch (...) {
-    return false;
-  }
 }
 
 bool ModelManager::Parse2DTableLine(const std::string& line, int* row_index,
