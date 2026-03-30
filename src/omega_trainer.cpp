@@ -17,16 +17,14 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <cstdio>
 #include <fstream>
 #include <iomanip>
-#include <numeric>
-#include <sstream>
 #include <iostream>
 #include <limits>
 #include <mutex>
+#include <numeric>
+#include <sstream>
 #include <unordered_map>
-#include "omega/tree_inference.h"
 
 namespace omega {
 
@@ -469,14 +467,11 @@ int OmegaTrainer::TrainModel(
     GtCmpsData dst;
     dst.topk = src.topk;
     dst.gt_cmps.reserve(query_ids_subset.size());
-    dst.total_cmps.reserve(query_ids_subset.size());
     for (int query_id : query_ids_subset) {
-      if (query_id < 0 || query_id >= static_cast<int>(src.gt_cmps.size()) ||
-          query_id >= static_cast<int>(src.total_cmps.size())) {
+      if (query_id < 0 || query_id >= static_cast<int>(src.gt_cmps.size())) {
         continue;
       }
       dst.gt_cmps.push_back(src.gt_cmps[query_id]);
-      dst.total_cmps.push_back(src.total_cmps[query_id]);
     }
     dst.num_queries = dst.gt_cmps.size();
     return dst;
