@@ -53,7 +53,6 @@ endif()
 # Omega source files
 # ============================================================
 set(OMEGA_SOURCES
-  src/feature_extractor.cpp
   src/model_manager.cpp
   src/search_context.cpp
   src/omega_api.cpp
