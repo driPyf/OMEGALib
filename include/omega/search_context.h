@@ -91,36 +91,6 @@ class SearchContext {
     return last_predicted_recall_at_target_;
   }
   bool EarlyStopHit() const { return early_stop_hit_; }
-  uint64_t GetShouldStopCalls() const { return should_stop_calls_; }
-  uint64_t GetPredictionCalls() const { return prediction_calls_; }
-  uint64_t GetShouldStopTimeNs() const { return should_stop_time_ns_; }
-  uint64_t GetPredictionEvalTimeNs() const { return prediction_eval_time_ns_; }
-  uint64_t GetSortedWindowTimeNs() const { return sorted_window_time_ns_; }
-  uint64_t GetAverageRecallEvalTimeNs() const {
-    return average_recall_eval_time_ns_;
-  }
-  uint64_t GetPredictionFeaturePrepTimeNs() const {
-    return prediction_feature_prep_time_ns_;
-  }
-  uint64_t GetReportVisitCandidateTimeNs() const {
-    return report_visit_candidate_time_ns_;
-  }
-  uint64_t GetReportHopTimeNs() const { return report_hop_time_ns_; }
-  uint64_t GetUpdateTopCandidatesTimeNs() const {
-    return update_top_candidates_time_ns_;
-  }
-  uint64_t GetPushTraversalWindowTimeNs() const {
-    return push_traversal_window_time_ns_;
-  }
-  uint64_t GetCollectedGtAdvanceCount() const {
-    return collected_gt_advance_count_;
-  }
-  uint64_t GetShouldStopCallsWithAdvance() const {
-    return should_stop_calls_with_advance_;
-  }
-  uint64_t GetMaxPredictionCallsPerShouldStop() const {
-    return max_prediction_calls_per_should_stop_;
-  }
 
   // Training-mode methods
   // ground_truth: top-k ground truth node IDs for this query (used to compute labels in real-time)
@@ -196,23 +166,6 @@ class SearchContext {
   std::vector<int> ground_truth_;  // Ground truth node IDs for current query (for real-time label computation)
   std::vector<int> gt_cmps_per_rank_;  // cmps value when each GT rank was first found in topk
   std::unordered_set<int> gt_found_set_;  // Set of GT node IDs already found (for O(1) lookup)
-
-  // Hot-path runtime statistics for diagnosing query-side overhead.
-  uint64_t should_stop_calls_;
-  uint64_t prediction_calls_;
-  uint64_t should_stop_time_ns_;
-  uint64_t prediction_eval_time_ns_;
-  uint64_t sorted_window_time_ns_;
-  uint64_t average_recall_eval_time_ns_;
-  uint64_t prediction_feature_prep_time_ns_;
-  uint64_t report_visit_candidate_time_ns_;
-  uint64_t report_hop_time_ns_;
-  uint64_t update_top_candidates_time_ns_;
-  uint64_t push_traversal_window_time_ns_;
-  uint64_t collected_gt_advance_count_;
-  uint64_t should_stop_calls_with_advance_;
-  uint64_t max_prediction_calls_per_should_stop_;
-  mutable bool collect_timing_;
 
   // Initialize Weighted BH rank-wise target allocation.
   void InitializeWeightedBH();

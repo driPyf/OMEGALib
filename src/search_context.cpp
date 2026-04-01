@@ -13,7 +13,6 @@
 // limitations under the License.
 
 #include "omega/search_context.h"
-#include "omega/profiling_timer.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -102,22 +101,7 @@ SearchContext::SearchContext(const GBDTModel* model, const ModelTables* tables,
       last_predicted_recall_at_target_(0.0f),
       early_stop_hit_(false),
       training_mode_enabled_(false),  // Training mode is disabled by default.
-      current_query_id_(-1),
-      should_stop_calls_(0),
-      prediction_calls_(0),
-      should_stop_time_ns_(0),
-      prediction_eval_time_ns_(0),
-      sorted_window_time_ns_(0),
-      average_recall_eval_time_ns_(0),
-      prediction_feature_prep_time_ns_(0),
-      report_visit_candidate_time_ns_(0),
-      report_hop_time_ns_(0),
-      update_top_candidates_time_ns_(0),
-      push_traversal_window_time_ns_(0),
-      collected_gt_advance_count_(0),
-      should_stop_calls_with_advance_(0),
-      max_prediction_calls_per_should_stop_(0),
-      collect_timing_(IsControlTimingEnabled()) {  // No training query is attached initially.
+      current_query_id_(-1) {  // No training query is attached initially.
   traversal_window_buffer_.resize(window_size_ > 0 ? window_size_ : 0);
   top_candidates_.reserve(k_ > 0 ? k_ : 0);
   sorted_window_scratch_.reserve(window_size_ > 0 ? window_size_ : 0);
@@ -149,20 +133,6 @@ void SearchContext::Reset() {
   last_predicted_recall_avg_ = 0.0f;
   last_predicted_recall_at_target_ = 0.0f;
   early_stop_hit_ = false;
-  should_stop_calls_ = 0;
-  prediction_calls_ = 0;
-  should_stop_time_ns_ = 0;
-  prediction_eval_time_ns_ = 0;
-  sorted_window_time_ns_ = 0;
-  average_recall_eval_time_ns_ = 0;
-  prediction_feature_prep_time_ns_ = 0;
-  report_visit_candidate_time_ns_ = 0;
-  report_hop_time_ns_ = 0;
-  update_top_candidates_time_ns_ = 0;
-  push_traversal_window_time_ns_ = 0;
-  collected_gt_advance_count_ = 0;
-  should_stop_calls_with_advance_ = 0;
-  max_prediction_calls_per_should_stop_ = 0;
 
   // Reset prediction interval
   auto interval = GetPredictionInterval(target_recall_);
@@ -261,21 +231,10 @@ bool SearchContext::ReportVisitCandidate(int node_id, float distance,
 
 bool SearchContext::ReportVisitCandidates(const VisitCandidate* candidates,
                                           size_t count) {
-  ProfilingTimer::tick_t func_start = 0;
-  if (collect_timing_) {
-    func_start = ProfilingTimer::Now();
-  }
-
   bool should_predict = false;
   for (size_t i = 0; i < count; ++i) {
     should_predict = ProcessVisitCandidate(candidates[i]);
   }
-
-  if (collect_timing_) {
-    report_visit_candidate_time_ns_ +=
-        ProfilingTimer::ElapsedNs(func_start, ProfilingTimer::Now());
-  }
-
   return should_predict;
 }
 
@@ -284,27 +243,11 @@ bool SearchContext::ProcessVisitCandidate(const VisitCandidate& candidate) {
 
   // Only track traversal window when close to next prediction point
   if (ShouldTrackTraversalWindow()) {
-    ProfilingTimer::tick_t push_start = 0;
-    if (collect_timing_) {
-      push_start = ProfilingTimer::Now();
-    }
     PushTraversalWindow(candidate.id, candidate.distance);
-    if (collect_timing_) {
-      push_traversal_window_time_ns_ +=
-          ProfilingTimer::ElapsedNs(push_start, ProfilingTimer::Now());
-    }
   }
 
   if (candidate.inserted_to_topk) {
-    ProfilingTimer::tick_t update_start = 0;
-    if (collect_timing_) {
-      update_start = ProfilingTimer::Now();
-    }
     UpdateTopCandidates(candidate.id, candidate.distance, comparisons_);
-    if (collect_timing_) {
-      update_top_candidates_time_ns_ +=
-          ProfilingTimer::ElapsedNs(update_start, ProfilingTimer::Now());
-    }
 
     if (training_mode_enabled_ && !ground_truth_.empty() &&
         gt_found_set_.find(candidate.id) == gt_found_set_.end()) {
@@ -354,11 +297,6 @@ bool SearchContext::ProcessVisitCandidate(const VisitCandidate& candidate) {
 }
 
 void SearchContext::ReportHop() {
-  ProfilingTimer::tick_t func_start = 0;
-  if (collect_timing_) {
-    func_start = ProfilingTimer::Now();
-  }
-
   hops_++;
 
   // In training mode, compute traversal-window stats once per hop and reuse
@@ -370,11 +308,6 @@ void SearchContext::ReportHop() {
   if (training_mode_enabled_) {
     std::vector<int> masked_ids;  // Empty for training mode (like original OMEGA)
     traversal_window_stats_cache_ = GetTraversalWindowStats(masked_ids);
-  }
-
-  if (collect_timing_) {
-    report_hop_time_ns_ +=
-        ProfilingTimer::ElapsedNs(func_start, ProfilingTimer::Now());
   }
 }
 
@@ -412,13 +345,6 @@ int SearchContext::GetPredictionBatchMinInterval() const {
 }
 
 bool SearchContext::ShouldStopEarly() {
-  ++should_stop_calls_;
-  ProfilingTimer::tick_t should_stop_start = 0;
-  if (collect_timing_) {
-    should_stop_start = ProfilingTimer::Now();
-  }
-  uint64_t predictions_before = prediction_calls_;
-  bool collected_gt_advanced_in_call = false;
   float predicted_recall_at_target = 0.0f;
 
   auto evaluate_average_recall = [this]() -> float {
@@ -441,10 +367,6 @@ bool SearchContext::ShouldStopEarly() {
   };
 
   if (!model_ || !tables_) {
-    if (collect_timing_) {
-      should_stop_time_ns_ +=
-          ProfilingTimer::ElapsedNs(should_stop_start, ProfilingTimer::Now());
-    }
     return false;  // No model, can't make decision
   }
 
@@ -456,7 +378,6 @@ bool SearchContext::ShouldStopEarly() {
 
     auto can_confirm_count = [&](int confirmed_count) -> bool {
       int idx = std::min(confirmed_count - 1, k_ - 1);
-      ++prediction_calls_;
       predicted_recall_at_target =
           PredictRecallForRankWithSortedWindow(idx, sorted_window_scratch_);
       last_predicted_recall_at_target_ = predicted_recall_at_target;
@@ -516,22 +437,10 @@ bool SearchContext::ShouldStopEarly() {
 
     if (best_confirmed > collected_gt_) {
       collected_gt_has_changed = true;
-      collected_gt_advanced_in_call = true;
-      collected_gt_advance_count_ += (best_confirmed - collected_gt_);
       collected_gt_ = best_confirmed;
       if (collected_gt_ >= k_) {
         early_stop_hit_ = true;
         last_predicted_recall_avg_ = 1.0f;
-        if (collected_gt_advanced_in_call) {
-          ++should_stop_calls_with_advance_;
-        }
-        max_prediction_calls_per_should_stop_ =
-            std::max(max_prediction_calls_per_should_stop_,
-                     prediction_calls_ - predictions_before);
-        if (collect_timing_) {
-          should_stop_time_ns_ +=
-              ProfilingTimer::ElapsedNs(should_stop_start, ProfilingTimer::Now());
-        }
         return true;  // All K results confirmed!
       }
     }
@@ -542,14 +451,6 @@ bool SearchContext::ShouldStopEarly() {
 
       if (predicted_recall_avg >= target_recall_) {
         early_stop_hit_ = true;
-        ++should_stop_calls_with_advance_;
-        max_prediction_calls_per_should_stop_ =
-            std::max(max_prediction_calls_per_should_stop_,
-                     prediction_calls_ - predictions_before);
-        if (collect_timing_) {
-          should_stop_time_ns_ +=
-              ProfilingTimer::ElapsedNs(should_stop_start, ProfilingTimer::Now());
-        }
         return true;  // Early stop!
       }
 
@@ -561,14 +462,6 @@ bool SearchContext::ShouldStopEarly() {
           min_interval +
           (initial_interval - min_interval) * std::max(0.0f, recall_gap));
       next_prediction_cmps_ = comparisons_ + interval_adjustment;
-      ++should_stop_calls_with_advance_;
-      max_prediction_calls_per_should_stop_ =
-          std::max(max_prediction_calls_per_should_stop_,
-                   prediction_calls_ - predictions_before);
-      if (collect_timing_) {
-        should_stop_time_ns_ +=
-            ProfilingTimer::ElapsedNs(should_stop_start, ProfilingTimer::Now());
-      }
       return false;
     }
 
@@ -581,14 +474,6 @@ bool SearchContext::ShouldStopEarly() {
           (initial_intervals_[idx] - min_intervals_[idx]) * std::max(0.0f, recall_gap));
       next_prediction_cmps_ = comparisons_ + interval_adjustment;
     }
-
-    max_prediction_calls_per_should_stop_ =
-        std::max(max_prediction_calls_per_should_stop_,
-                 prediction_calls_ - predictions_before);
-    if (collect_timing_) {
-      should_stop_time_ns_ +=
-          ProfilingTimer::ElapsedNs(should_stop_start, ProfilingTimer::Now());
-    }
     return false;
   }
 
@@ -596,14 +481,9 @@ bool SearchContext::ShouldStopEarly() {
   // Extract features and predict
   std::vector<float> features = ExtractFeatures();
   if (features.empty()) {
-    if (collect_timing_) {
-      should_stop_time_ns_ +=
-          ProfilingTimer::ElapsedNs(should_stop_start, ProfilingTimer::Now());
-    }
     return false;  // Not enough data yet
   }
 
-  ++prediction_calls_;
   float predicted_recall = PredictWithFeatures(features);
   last_predicted_recall_at_target_ = predicted_recall;
   last_predicted_recall_avg_ = predicted_recall;
@@ -625,15 +505,7 @@ bool SearchContext::ShouldStopEarly() {
   // Stop if we've reached target recall
   if (predicted_recall >= target_recall_) {
     early_stop_hit_ = true;
-    if (collect_timing_) {
-      should_stop_time_ns_ +=
-          ProfilingTimer::ElapsedNs(should_stop_start, ProfilingTimer::Now());
-    }
     return true;
-  }
-  if (collect_timing_) {
-    should_stop_time_ns_ +=
-        ProfilingTimer::ElapsedNs(should_stop_start, ProfilingTimer::Now());
   }
   return false;
 }
@@ -755,11 +627,6 @@ float SearchContext::PredictWithFeatureArray(
     return 0.0f;
   }
 
-  ProfilingTimer::tick_t prediction_start = 0;
-  if (collect_timing_) {
-    prediction_start = ProfilingTimer::Now();
-  }
-
   std::array<double, 11> features_double{};
   for (size_t i = 0; i < features.size(); ++i) {
     features_double[i] = static_cast<double>(features[i]);
@@ -782,10 +649,6 @@ float SearchContext::PredictWithFeatureArray(
   // probability/confidence statements; using the uncalibrated model score would
   // bias the per-rank targets and make the final top-k control less reliable.
   if (!tables_ || tables_->threshold_table.empty()) {
-    if (collect_timing_) {
-      prediction_eval_time_ns_ +=
-          ProfilingTimer::ElapsedNs(prediction_start, ProfilingTimer::Now());
-    }
     return static_cast<float>(probability);
   }
 
@@ -796,11 +659,6 @@ float SearchContext::PredictWithFeatureArray(
   auto it = tables_->threshold_table.upper_bound(score_key);
   if (it != tables_->threshold_table.begin()) {
     --it;
-  }
-
-  if (collect_timing_) {
-    prediction_eval_time_ns_ +=
-        ProfilingTimer::ElapsedNs(prediction_start, ProfilingTimer::Now());
   }
   return it->second;
 }
