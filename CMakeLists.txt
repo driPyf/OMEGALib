@@ -83,3 +83,14 @@ unset(_SAVED_CMAKE_ARCHIVE_OUTPUT_DIRECTORY)
 get_target_property(omega_SOURCE_DIR omega SOURCE_DIR)
 set(OMEGA_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_include_directories(omega PUBLIC $<BUILD_INTERFACE:${OMEGA_INCLUDE_DIR}>)
+
+if(BUILD_TESTING)
+  enable_testing()
+
+  add_executable(omega_model_manager_test tests/model_manager_test.cpp)
+  target_link_libraries(omega_model_manager_test PRIVATE omega gtest gtest_main)
+  target_include_directories(omega_model_manager_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+  )
+  add_test(NAME omega_model_manager_test COMMAND omega_model_manager_test)
+endif()
