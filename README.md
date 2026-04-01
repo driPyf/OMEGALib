@@ -1,70 +1,158 @@
-# OMEGA - One-Model Efficient Generalized ANN
+# OMEGALib
 
-OMEGA is a lightweight adaptive search library for Approximate Nearest Neighbor (ANN) search. It provides dynamic early stopping using decision tree models to reduce distance computations while maintaining target recall.
+OMEGALib is a C++ library for OMEGA-based adaptive early termination in approximate nearest neighbor (ANN) search.
 
-## Features
+Its main goal is to make OMEGA reusable as a standalone algorithm library rather than tying the implementation to a single vector database. zvec is currently an important integration target, but OMEGALib is intended to remain generally usable by other ANN systems that want:
 
-- **Lightweight Decision Tree Inference**: Minimal GBDT implementation (~2-3 MB)
-- **No Heavy Dependencies**: Extracted tree training/inference without LightGBM library
-- **Cross-Platform**: Supports Linux, macOS, Windows
-- **Well-Tested**: Comprehensive unit tests with Google Test
-- **Google C++ Style**: Follows Google C++ coding standards
+- query-time adaptive early termination
+- OMEGA model training in C++
+- model/table loading and runtime management
+- a lightweight runtime API for integrating OMEGA with an existing search loop
 
-## Directory Structure
+## What OMEGALib Provides
 
-```
-omega/
-├── include/           # Public headers
+OMEGALib currently includes four main parts:
+
+- **SearchContext**
+  Maintains query-time state for OMEGA, including traversal-window statistics, target recall handling, and stop/continue decisions.
+
+- **ModelManager**
+  Loads and manages OMEGA model artifacts such as `model.txt`, `threshold_table.txt`, `interval_table.txt`, `gt_collected_table.txt`, and `gt_cmps_all_table.txt`.
+
+- **OmegaTrainer**
+  Trains OMEGA models in C++ using the LightGBM C API and generates the runtime tables required by `SearchContext`.
+
+- **C API / integration layer**
+  Exposes runtime handles for model loading, search-context creation, and training-data extraction so external systems can integrate OMEGA into their own ANN search loops.
+
+## Repository Layout
+
+```text
+OMEGALib/
+├── include/omega/
+│   ├── ground_truth.h
+│   ├── model_manager.h
+│   ├── omega_api.h
+│   ├── omega_trainer.h
+│   ├── search_context.h
 │   └── tree_inference.h
-├── src/              # Implementation
+├── src/
+│   ├── ground_truth.cpp
+│   ├── model_manager.cpp
+│   ├── omega_api.cpp
+│   ├── omega_trainer.cpp
+│   ├── search_context.cpp
 │   └── tree_inference.cpp
-├── tests/            # Unit tests
+├── tests/
+│   ├── model_manager_test.cpp
 │   └── tree_inference_test.cpp
-├── python/           # Python bindings (future)
-└── CMakeLists.txt    # Build configuration
+├── eigen/        # header-only Eigen dependency
+├── lightgbm/     # vendored LightGBM dependency
+└── CMakeLists.txt
 ```
+
+## Dependencies
+
+OMEGALib currently depends on:
+
+- **LightGBM**
+  Used for training OMEGA models through the LightGBM C API.
+
+- **OpenMP**
+  Required by the current LightGBM-based build.
+
+- **Eigen**
+  Used for fast ground-truth computation utilities.
+
+This means OMEGALib is not just a minimal tree-inference library anymore. It is a full training + runtime library for OMEGA.
 
 ## Building
 
 ```bash
-mkdir build && cd build
-cmake .. -DOMEGA_BUILD_TESTS=ON
-make -j8
+mkdir build
+cd build
+cmake .. -DBUILD_TESTING=ON
+cmake --build . -j
 ```
 
 ## Running Tests
 
+If tests are enabled, OMEGALib currently provides GoogleTest-based unit tests such as:
+
+- `omega_model_manager_test`
+
+Depending on the build configuration, tests can be run via `ctest`:
+
 ```bash
-./tree_inference_test
+ctest --output-on-failure
 ```
 
-## Usage Example
+## Public Interfaces
 
-```cpp
-#include "tree_inference.h"
+### Runtime API
 
-// Load a trained GBDT model
-omega::GBDTModel model;
-model.LoadFromFile("model.txt");
+The main runtime entry points are exposed in:
 
-// Predict probability
-double features[11] = {1.0, 2.0, ..., 11.0};
-double probability = model.Predict(features, 11);
-```
+- `include/omega/omega_api.h`
+
+This API supports:
+
+- loading model artifacts from a directory
+- creating OMEGA search contexts with `target_recall`, `k`, and `window_size`
+- enabling training mode and extracting collected training data
+
+### Training API
+
+The training entry point is exposed in:
+
+- `include/omega/omega_trainer.h`
+
+This API supports:
+
+- training OMEGA models from collected training records
+- generating the threshold / interval / ground-truth tables needed at runtime
+
+## Typical Integration Pattern
+
+OMEGALib is designed to sit on top of an existing ANN search loop rather than replace it.
+
+A typical integration looks like this:
+
+1. The host ANN system runs its normal search algorithm.
+2. During search, it reports query-state updates into OMEGA's `SearchContext`.
+3. OMEGA decides whether the target recall is likely to have been reached.
+4. The host system either stops early or continues searching.
+
+This makes OMEGALib especially suitable for systems that already have a mature ANN implementation and want to add adaptive early termination without maintaining a second search engine.
 
 ## Integration with zvec
 
-This library is designed to be integrated into Alibaba's zvec vector database as a submodule:
+zvec is currently one of the main production-oriented integrations of OMEGALib.
 
-```bash
-cd zvec/thirdparty
-git submodule add <omega-repo-url> omega
-```
+In zvec:
+
+- HNSW remains the underlying search engine
+- OMEGALib provides query-time stopping logic and offline model training
+- model artifacts are persisted under `omega_model/`
+- runtime behavior falls back to plain HNSW when no OMEGA model is available or the dataset is below threshold
+
+OMEGALib itself is not specific to zvec, and the library is intended to stay reusable by other ANN systems.
+
+## Status
+
+OMEGALib is under active development. The current codebase already supports:
+
+- C++ model training
+- model/table loading
+- adaptive early-termination runtime state
+- unit tests for key runtime components
+
+Future work may include:
+
+- cleaner standalone packaging
+- broader test coverage
+- additional integration examples outside zvec
 
 ## License
 
-Apache License 2.0 - See LICENSE file for details
-
-## Contributing
-
-This is part of the OMEGA integration project for zvec. For questions or contributions, please refer to the main zvec repository.
+Please refer to the repository license files and the vendored third-party dependencies for current licensing details.
