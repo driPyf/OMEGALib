@@ -71,6 +71,9 @@ target_include_directories(omega PUBLIC
   $<BUILD_INTERFACE:${EIGEN_INCLUDE_DIR}>
   $<INSTALL_INTERFACE:include>
 )
+target_compile_options(omega PRIVATE
+  $<$<CXX_COMPILER_ID:MSVC>:/utf-8>
+)
 
 # Link LightGBM and OpenMP when available
 target_link_libraries(omega PUBLIC _lightgbm)
