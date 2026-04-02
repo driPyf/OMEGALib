@@ -49,6 +49,7 @@ target_compile_options(lightgbm_objs PRIVATE ${_OMEGA_LIGHTGBM_DISABLE_SOCKET_FL
 get_target_property(_OMEGA_LIGHTGBM_SOURCES lightgbm_objs SOURCES)
 list(FILTER _OMEGA_LIGHTGBM_SOURCES EXCLUDE REGEX "(^|.*/)src/network/linkers_socket\\.cpp$")
 set_property(TARGET lightgbm_objs PROPERTY SOURCES "${_OMEGA_LIGHTGBM_SOURCES}")
+target_sources(_lightgbm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/lightgbm_network_stubs.cpp)
 unset(_OMEGA_LIGHTGBM_SOURCES)
 unset(_OMEGA_LIGHTGBM_DISABLE_SOCKET_FLAGS)
 
@@ -73,7 +74,6 @@ set(OMEGA_SOURCES
   src/omega_trainer.cpp
   src/tree_inference.cpp
   src/ground_truth.cpp
-  src/lightgbm_network_stubs.cpp
 )
 
 # Create omega library
