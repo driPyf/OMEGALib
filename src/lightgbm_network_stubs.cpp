@@ -11,6 +11,21 @@
 
 namespace LightGBM {
 
+namespace {
+
+using RecvIntFn = void (Linkers::*)(int, char*, int) const;
+using SendIntFn = void (Linkers::*)(int, char*, int) const;
+using SendRecvIntFn = void (Linkers::*)(int, char*, int, int, char*, int);
+
+[[maybe_unused]] RecvIntFn kForceEmitRecvInt =
+    static_cast<RecvIntFn>(&Linkers::Recv);
+[[maybe_unused]] SendIntFn kForceEmitSendInt =
+    static_cast<SendIntFn>(&Linkers::Send);
+[[maybe_unused]] SendRecvIntFn kForceEmitSendRecvInt =
+    static_cast<SendRecvIntFn>(&Linkers::SendRecv);
+
+}  // namespace
+
 Linkers::Linkers(Config config) {
   is_init_ = false;
   rank_ = 0;
