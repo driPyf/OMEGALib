@@ -38,6 +38,20 @@ set(USE_OPENMP ${OMEGA_USE_OPENMP} CACHE BOOL "Enable OpenMP for LightGBM" FORCE
 # Add LightGBM as subdirectory
 add_subdirectory(lightgbm EXCLUDE_FROM_ALL)
 
+# Omega only uses single-node LightGBM training. Disable the vendored socket
+# networking backend at the target level so platform builds (notably Android)
+# do not pull in distributed networking code paths.
+set(_OMEGA_LIGHTGBM_DISABLE_SOCKET_FLAGS
+  $<$<CXX_COMPILER_ID:MSVC>:/UUSE_SOCKET>
+  $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UUSE_SOCKET>)
+target_compile_options(lightgbm_objs PRIVATE ${_OMEGA_LIGHTGBM_DISABLE_SOCKET_FLAGS})
+
+get_target_property(_OMEGA_LIGHTGBM_SOURCES lightgbm_objs SOURCES)
+list(FILTER _OMEGA_LIGHTGBM_SOURCES EXCLUDE REGEX "(^|.*/)src/network/linkers_socket\\.cpp$")
+set_property(TARGET lightgbm_objs PROPERTY SOURCES "${_OMEGA_LIGHTGBM_SOURCES}")
+unset(_OMEGA_LIGHTGBM_SOURCES)
+unset(_OMEGA_LIGHTGBM_DISABLE_SOCKET_FLAGS)
+
 # ============================================================
 # Eigen dependency (header-only, for fast ground truth computation)
 # ============================================================
@@ -59,6 +73,7 @@ set(OMEGA_SOURCES
   src/omega_trainer.cpp
   src/tree_inference.cpp
   src/ground_truth.cpp
+  src/lightgbm_network_stubs.cpp
 )
 
 # Create omega library
