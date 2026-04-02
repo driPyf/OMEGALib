@@ -92,7 +92,7 @@ target_include_directories(omega PUBLIC
   $<BUILD_INTERFACE:${EIGEN_INCLUDE_DIR}>
   $<INSTALL_INTERFACE:include>
 )
-target_compile_options(omega PRIVATE
+target_compile_options(omega PUBLIC
   $<$<CXX_COMPILER_ID:MSVC>:/utf-8>
 )
 
