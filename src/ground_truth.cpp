@@ -9,14 +9,11 @@
 #include <cmath>
 #include <limits>
 #include <queue>
+#include <thread>
 #include <vector>
 
 // Eigen for fast matrix operations (cross-platform, header-only)
 #include <Eigen/Core>
-
-#ifdef _OPENMP
-#include <omp.h>
-#endif
 
 namespace omega {
 
@@ -40,6 +37,17 @@ struct MaxHeapCmp {
 };
 
 using MaxHeap = std::priority_queue<IndexDistPair, std::vector<IndexDistPair>, MaxHeapCmp>;
+
+size_t ResolveThreadCount(size_t work_items) {
+  if (work_items == 0) {
+    return 0;
+  }
+  size_t thread_count = std::thread::hardware_concurrency();
+  if (thread_count == 0) {
+    thread_count = 1;
+  }
+  return std::min(thread_count, work_items);
+}
 
 }  // namespace
 
@@ -152,38 +160,61 @@ std::vector<std::vector<uint64_t>> ComputeGroundTruth(
       dist_matrix *= -1.0f;
     }
 
-    // Extract top-k for each query in this batch
-#pragma omp parallel for schedule(dynamic, 16)
-    for (int64_t q_local = 0; q_local < static_cast<int64_t>(current_batch_size); ++q_local) {
-      size_t q = batch_start + q_local;
-      MaxHeap heap;
+    // Extract top-k for each query in this batch using std::thread fanout.
+    auto process_range = [&](size_t begin, size_t end) {
+      for (size_t q_local = begin; q_local < end; ++q_local) {
+        size_t q = batch_start + q_local;
+        MaxHeap heap;
 
-      // Determine which base index to exclude for this query
-      size_t exclude_idx = use_query_indices ? query_base_indices[q] : q;
+        // Determine which base index to exclude for this query
+        size_t exclude_idx = use_query_indices ? query_base_indices[q] : q;
 
-      for (size_t p = 0; p < num_base; ++p) {
-        // Skip self if requested (using correct base index mapping)
-        if (exclude_self && p == exclude_idx) {
-          continue;
+        for (size_t p = 0; p < num_base; ++p) {
+          // Skip self if requested (using correct base index mapping)
+          if (exclude_self && p == exclude_idx) {
+            continue;
+          }
+
+          float dist = dist_matrix(q_local, p);
+
+          if (heap.size() < actual_k) {
+            heap.emplace(p, dist);
+          } else if (dist < heap.top().second) {
+            heap.pop();
+            heap.emplace(p, dist);
+          }
         }
 
-        float dist = dist_matrix(q_local, p);
-
-        if (heap.size() < actual_k) {
-          heap.emplace(p, dist);
-        } else if (dist < heap.top().second) {
+        // Extract results (in reverse order since heap gives max first)
+        std::vector<uint64_t>& result = ground_truth[q];
+        result.resize(std::min(k, heap.size()));
+        for (size_t i = result.size(); i > 0; --i) {
+          result[i - 1] = heap.top().first;
           heap.pop();
-          heap.emplace(p, dist);
         }
       }
+    };
 
-      // Extract results (in reverse order since heap gives max first)
-      std::vector<uint64_t>& result = ground_truth[q];
-      result.resize(std::min(k, heap.size()));
-      for (size_t i = result.size(); i > 0; --i) {
-        result[i - 1] = heap.top().first;
-        heap.pop();
+    size_t thread_count = ResolveThreadCount(current_batch_size);
+    if (thread_count <= 1) {
+      process_range(0, current_batch_size);
+      continue;
+    }
+
+    size_t queries_per_thread = (current_batch_size + thread_count - 1) / thread_count;
+    std::vector<std::thread> workers;
+    workers.reserve(thread_count);
+    for (size_t t = 0; t < thread_count; ++t) {
+      size_t begin = t * queries_per_thread;
+      if (begin >= current_batch_size) {
+        break;
       }
+      size_t end = std::min(begin + queries_per_thread, current_batch_size);
+      workers.emplace_back(process_range, begin, end);
+    }
+
+    for (auto& worker : workers) {
+      worker.join();
     }
   }
 
