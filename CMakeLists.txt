@@ -18,13 +18,22 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 # ============================================================
 message(STATUS "OMEGA: Building with LightGBM support")
 
-# Find OpenMP (required by LightGBM)
-find_package(OpenMP REQUIRED)
+# Find OpenMP when available. Some platforms, such as GitHub-hosted macOS
+# runners, do not provide it out of the box. In that case we still build
+# LightGBM/OMEGA in single-threaded mode so zvec remains portable.
+find_package(OpenMP QUIET)
+if(OpenMP_FOUND)
+  set(OMEGA_USE_OPENMP ON)
+  message(STATUS "OMEGA: OpenMP found, enabling multi-threaded LightGBM")
+else()
+  set(OMEGA_USE_OPENMP OFF)
+  message(WARNING "OMEGA: OpenMP not found, building LightGBM without OpenMP")
+endif()
 
 # LightGBM build options
 set(BUILD_STATIC_LIB ON CACHE BOOL "Build LightGBM as static library" FORCE)
 set(BUILD_CLI OFF CACHE BOOL "Disable LightGBM CLI" FORCE)
-set(USE_OPENMP ON CACHE BOOL "Enable OpenMP for LightGBM" FORCE)
+set(USE_OPENMP ${OMEGA_USE_OPENMP} CACHE BOOL "Enable OpenMP for LightGBM" FORCE)
 
 # Add LightGBM as subdirectory
 add_subdirectory(lightgbm EXCLUDE_FROM_ALL)
@@ -63,8 +72,11 @@ target_include_directories(omega PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 
-# Link LightGBM and OpenMP
-target_link_libraries(omega PUBLIC _lightgbm OpenMP::OpenMP_CXX)
+# Link LightGBM and OpenMP when available
+target_link_libraries(omega PUBLIC _lightgbm)
+if(OMEGA_USE_OPENMP)
+  target_link_libraries(omega PUBLIC OpenMP::OpenMP_CXX)
+endif()
 
 # Restore output directory
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${_SAVED_CMAKE_ARCHIVE_OUTPUT_DIRECTORY})
