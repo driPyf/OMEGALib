@@ -3,6 +3,10 @@
 // Licensed under the MIT License. See the LICENSE file in the project root for
 // license terms.
 
+#ifdef USE_SOCKET
+#undef USE_SOCKET
+#endif
+
 #include "../lightgbm/src/network/linkers.h"
 
 namespace LightGBM {
