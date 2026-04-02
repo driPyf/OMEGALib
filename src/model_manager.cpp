@@ -5,6 +5,7 @@
 
 #include "omega/model_manager.h"
 #include <cmath>
+#include <exception>
 #include <fstream>
 #include <sstream>
 
@@ -17,6 +18,8 @@ ModelManager::~ModelManager() = default;
 
 bool ModelManager::LoadModel(const std::string& model_dir) {
   model_loaded_ = false;
+  model_.reset();
+  tables_.reset();
 
   // Create new model and tables
   model_ = std::make_unique<GBDTModel>();
@@ -24,7 +27,19 @@ bool ModelManager::LoadModel(const std::string& model_dir) {
 
   // Load GBDT model
   std::string model_path = model_dir + "/model.txt";
-  if (!model_->LoadFromFile(model_path)) {
+  try {
+    if (!model_->LoadFromFile(model_path)) {
+      model_.reset();
+      tables_.reset();
+      return false;
+    }
+  } catch (const std::exception&) {
+    model_.reset();
+    tables_.reset();
+    return false;
+  } catch (...) {
+    model_.reset();
+    tables_.reset();
     return false;
   }
 
