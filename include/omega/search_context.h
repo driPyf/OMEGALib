@@ -45,9 +45,17 @@ class SearchContext {
     int cmps;
   };
 
+  struct PredictionProfileStats {
+    uint64_t checks;
+    uint64_t model_calls;
+    uint64_t decision_time_ns;
+    uint64_t model_time_ns;
+  };
+
   // Create a search context with parameters
   SearchContext(const GBDTModel* model, const ModelTables* tables,
-                float target_recall, int k, int window_size);
+                float target_recall, int k, int window_size,
+                int k_train = 1);
 
   ~SearchContext();
 
@@ -97,7 +105,15 @@ class SearchContext {
   int GetNextPredictionCmps() const { return next_prediction_cmps_; }
   int GetTopCandidateCountForHook() const { return TopCandidateCount(); }
   int GetK() const { return k_; }
+  int GetKTrain() const { return k_train_; }
   int GetPredictionBatchMinInterval() const;
+  void SetPredictionProfilingEnabled(bool enabled) {
+    profile_prediction_timing_ = enabled;
+  }
+  PredictionProfileStats GetPredictionProfileStats() const {
+    return {prediction_checks_, model_prediction_calls_, prediction_time_ns_,
+            model_prediction_time_ns_};
+  }
 
  private:
   const GBDTModel* model_;
@@ -139,6 +155,14 @@ class SearchContext {
   float last_predicted_recall_avg_;
   float last_predicted_recall_at_target_;
   bool early_stop_hit_;
+
+  // Lightweight prediction-path accounting. Timing stays disabled unless the
+  // embedding application opts in for diagnostics.
+  bool profile_prediction_timing_;
+  uint64_t prediction_checks_;
+  uint64_t model_prediction_calls_;
+  uint64_t prediction_time_ns_;
+  uint64_t model_prediction_time_ns_;
 
   // Weighted BH state
   // These arrays hold the per-rank targets/intervals derived from the global

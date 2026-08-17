@@ -6,6 +6,7 @@
 #include "omega/search_context.h"
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <unordered_map>
@@ -68,16 +69,41 @@ const std::vector<float>& GetWeightedBhRatios(int k, int k_train) {
   return ratios;
 }
 
+class ScopedDurationAccumulator {
+ public:
+  ScopedDurationAccumulator(uint64_t* total_ns, bool enabled)
+      : total_ns_(total_ns), enabled_(enabled) {
+    if (enabled_) {
+      start_ = std::chrono::steady_clock::now();
+    }
+  }
+
+  ~ScopedDurationAccumulator() {
+    if (!enabled_ || total_ns_ == nullptr) {
+      return;
+    }
+    auto elapsed = std::chrono::steady_clock::now() - start_;
+    *total_ns_ += static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
+  }
+
+ private:
+  uint64_t* total_ns_;
+  bool enabled_;
+  std::chrono::steady_clock::time_point start_;
+};
+
 }  // namespace
 
 SearchContext::SearchContext(const GBDTModel* model, const ModelTables* tables,
-                             float target_recall, int k, int window_size)
+                             float target_recall, int k, int window_size,
+                             int k_train)
     : model_(model),
       tables_(tables),
       target_recall_(target_recall),
       k_(k),
       window_size_(window_size),
-      k_train_(1),  // Number of GT ranks required for a positive training label.
+      k_train_(std::max(1, k_train)),
       use_weighted_bh_(true),  // Enable Weighted BH rank-wise target allocation by default.
       top_candidates_sorted_cache_valid_(true),
       traversal_window_head_(0),
@@ -91,6 +117,11 @@ SearchContext::SearchContext(const GBDTModel* model, const ModelTables* tables,
       last_predicted_recall_avg_(0.0f),
       last_predicted_recall_at_target_(0.0f),
       early_stop_hit_(false),
+      profile_prediction_timing_(false),
+      prediction_checks_(0),
+      model_prediction_calls_(0),
+      prediction_time_ns_(0),
+      model_prediction_time_ns_(0),
       training_mode_enabled_(false),  // Training mode is disabled by default.
       current_query_id_(-1) {  // No training query is attached initially.
   traversal_window_buffer_.resize(window_size_ > 0 ? window_size_ : 0);
@@ -124,6 +155,10 @@ void SearchContext::Reset() {
   last_predicted_recall_avg_ = 0.0f;
   last_predicted_recall_at_target_ = 0.0f;
   early_stop_hit_ = false;
+  prediction_checks_ = 0;
+  model_prediction_calls_ = 0;
+  prediction_time_ns_ = 0;
+  model_prediction_time_ns_ = 0;
 
   // Reset prediction interval
   auto interval = GetPredictionInterval(target_recall_);
@@ -360,6 +395,9 @@ bool SearchContext::ShouldStopEarly() {
   if (!model_ || !tables_) {
     return false;  // No model, can't make decision
   }
+  ++prediction_checks_;
+  ScopedDurationAccumulator prediction_timer(&prediction_time_ns_,
+                                             profile_prediction_timing_);
 
   // Advance rank-wise predictions using the current collected_gt frontier.
   if (use_weighted_bh_ && TopCandidateCount() >= k_) {
@@ -617,6 +655,7 @@ float SearchContext::PredictWithFeatureArray(
   if (!model_) {
     return 0.0f;
   }
+  ++model_prediction_calls_;
 
   std::array<double, 11> features_double{};
   for (size_t i = 0; i < features.size(); ++i) {
@@ -625,9 +664,14 @@ float SearchContext::PredictWithFeatureArray(
 
   // Match the reference LightGBM flow: get raw score first, then apply sigmoid
   // exactly once before threshold-table calibration.
-  double raw_score =
-      model_->PredictRaw(features_double.data(),
-                         static_cast<int32_t>(features_double.size()));
+  double raw_score = 0.0;
+  {
+    ScopedDurationAccumulator model_timer(&model_prediction_time_ns_,
+                                          profile_prediction_timing_);
+    raw_score =
+        model_->PredictRaw(features_double.data(),
+                           static_cast<int32_t>(features_double.size()));
+  }
 
   // Apply sigmoid to get the raw model confidence.
   double probability = 1.0 / (1.0 + std::exp(-raw_score));
@@ -796,7 +840,7 @@ void SearchContext::EnableTrainingMode(int query_id, const std::vector<int>& gro
   training_mode_enabled_ = true;
   current_query_id_ = query_id;
   ground_truth_ = ground_truth;
-  k_train_ = k_train;
+  k_train_ = std::max(1, k_train);
   traversal_window_stats_cache_.clear();  // Clear cache for new query
   top_candidates_.clear();
   top_candidates_sorted_cache_.clear();

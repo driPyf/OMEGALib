@@ -74,6 +74,16 @@ OmegaSearchHandle omega_search_create_with_params(OmegaModelHandle model,
                                                    float target_recall,
                                                    int k,
                                                    int window_size) {
+  return omega_search_create_with_params_and_k_train(model, target_recall, k,
+                                                     window_size, 1);
+}
+
+OmegaSearchHandle omega_search_create_with_params_and_k_train(
+    OmegaModelHandle model,
+    float target_recall,
+    int k,
+    int window_size,
+    int k_train) {
   // Allow nullptr model for training mode
   // In training mode, we collect features without making predictions
   const omega::GBDTModel* gbdt_model = nullptr;
@@ -91,7 +101,8 @@ OmegaSearchHandle omega_search_create_with_params(OmegaModelHandle model,
         tables,
         target_recall,
         k,
-        window_size);
+        window_size,
+        k_train);
     return handle;
   } catch (...) {
     return nullptr;

@@ -57,6 +57,16 @@ OmegaSearchHandle omega_search_create_with_params(OmegaModelHandle model,
                                                    int k,
                                                    int window_size);
 
+// Create a new search context with an explicit inference k_train.
+// k_train controls how many ranks are confirmed as a block during top-k
+// adaptive stopping. Values <= 0 are treated as 1.
+OmegaSearchHandle omega_search_create_with_params_and_k_train(
+    OmegaModelHandle model,
+    float target_recall,
+    int k,
+    int window_size,
+    int k_train);
+
 // Destroy search context and free resources
 // Parameters:
 //   handle: Search context handle
